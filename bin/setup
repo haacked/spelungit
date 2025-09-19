@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+#/ Usage: bin/setup [options]
+#/ Description: Set up development environment for Git History MCP Server
+#/ Options:
+#/   --dev         Install development dependencies (includes system tools via brew on macOS)
+#/   --production  Install only production dependencies
+#/   -v, --verbose Verbose output
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+dev_mode=false
+production_mode=false
+
+while (("$#")); do
+	case "$1" in
+	--dev)
+		dev_mode=true
+		shift
+		;;
+	--production)
+		production_mode=true
+		shift
+		;;
+	-v | --verbose)
+		export VERBOSE=1
+		shift
+		;;
+	-h | --help)
+		show_help
+		exit 0
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+print_color blue "Setting up Git History MCP Server development environment..."
+
+success=true
+
+# Install system dependencies if needed
+install_system_deps() {
+	local deps_to_install=()
+
+	# Check for development tools
+	if ! command_exists shellcheck; then
+		deps_to_install+=("shellcheck")
+	fi
+
+	if ! command_exists markdownlint; then
+		deps_to_install+=("markdownlint-cli")
+	fi
+
+	if ! command_exists shfmt; then
+		deps_to_install+=("shfmt")
+	fi
+
+	# Install missing dependencies
+	if [ ${#deps_to_install[@]} -gt 0 ]; then
+		if [[ "$OSTYPE" == "darwin"* ]]; then
+			# macOS - use brew
+			if ! command_exists brew; then
+				error "Homebrew is required but not installed"
+				info "Install Homebrew: https://brew.sh/"
+				return 1
+			fi
+
+			info "Installing missing development tools with Homebrew..."
+			for dep in "${deps_to_install[@]}"; do
+				if ! run_command "brew install $dep" "Installing $dep"; then
+					warning "Failed to install $dep - some features may not be available"
+				fi
+			done
+		else
+			# Non-macOS systems
+			warning "System dependency installation only supported on macOS"
+			info "Please install these tools manually for full functionality:"
+			for dep in "${deps_to_install[@]}"; do
+				case $dep in
+				shellcheck)
+					info "  - shellcheck: https://github.com/koalaman/shellcheck#installing"
+					;;
+				markdownlint-cli)
+					info "  - markdownlint: npm install -g markdownlint-cli"
+					;;
+				shfmt)
+					info "  - shfmt: go install mvdan.cc/sh/v3/cmd/shfmt@latest"
+					;;
+				esac
+			done
+		fi
+	else
+		info "All development tools are already installed"
+	fi
+}
+
+# Install system dependencies
+if $dev_mode || ! $production_mode; then
+	install_system_deps
+fi
+
+# Check for Python version first
+check_python_deps
+python_check_result=$?
+if [ "$python_check_result" -eq 1 ]; then
+	# Fatal Python issues
+	success=false
+	exit 1
+elif [ "$python_check_result" -eq 2 ]; then
+	# Problematic Python version (like 3.11.0a2) - continue but skip pip operations
+	warning "Detected problematic Python version - skipping pip upgrade and dependency installation"
+	skip_pip_operations=true
+else
+	skip_pip_operations=false
+fi
+
+# Handle virtual environment
+ensure_venv
+venv_exit_code=$?
+
+if [ $venv_exit_code -eq 2 ]; then
+	# ensure_venv created a new venv and wants us to retry
+	exit 0
+elif [ $venv_exit_code -ne 0 ]; then
+	error "Failed to ensure virtual environment"
+	success=false
+	exit 1
+fi
+
+# If we're still not in a venv after ensure_venv, something's wrong
+if [ -z "$VIRTUAL_ENV" ]; then
+	error "Not in virtual environment after setup"
+	info "Please manually activate: source venv/bin/activate"
+	info "Then run: $0 $*"
+	exit 1
+fi
+
+# Check and upgrade pip (with error handling)
+if ! $skip_pip_operations; then
+	if pip --version >/dev/null 2>&1; then
+		pip_version=$(pip --version | cut -d' ' -f2)
+		info "Current pip version: $pip_version"
+
+		# Check if pip version is very old (< 22.0) using simple version comparison
+		pip_major=$(echo "$pip_version" | cut -d. -f1)
+		pip_minor=$(echo "$pip_version" | cut -d. -f2)
+
+		if [ "$pip_major" -gt 21 ] || ([ "$pip_major" -eq 22 ] && [ "$pip_minor" -ge 0 ]); then
+			info "Pip version is recent enough, skipping upgrade"
+		else
+			warning "Pip version $pip_version is old and may have SSL/certificate issues"
+			info "Attempting multiple upgrade strategies for old pip..."
+
+			# Strategy 1: Try get-pip.py bootstrap (often works when old pip fails)
+			if upgrade_old_pip; then
+				info "Pip upgrade successful using get-pip.py bootstrap"
+			else
+				# Strategy 2: Try with trusted hosts
+				if run_command "python -m pip install --upgrade pip --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org" "Attempting pip upgrade with trusted hosts"; then
+					info "Pip upgrade successful using trusted hosts"
+				else
+					# Strategy 3: Recommend virtual environment recreation
+					warning "All pip upgrade strategies failed due to SSL certificate issues"
+					info "This is a known issue with pip < 22.0 and SSL certificates"
+					warning "Recommended solution - recreate the virtual environment:"
+					info "  deactivate  # exit current venv"
+					info "  rm -rf venv && python -m venv venv"
+					info "  source venv/bin/activate"
+					info "  $0 $*"
+					info "Continuing with current pip version..."
+				fi
+			fi
+		fi
+	else
+		warning "Pip is not functioning properly - skipping pip operations"
+		skip_pip_operations=true
+	fi
+else
+	info "Skipping pip upgrade due to incompatible Python version"
+fi
+
+# Install dependencies based on mode
+if ! $skip_pip_operations; then
+	trusted_host_flags="--trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org"
+
+	if $production_mode; then
+		if ! run_command "pip install -r requirements-lite.txt" "Installing production dependencies"; then
+			warning "Standard installation failed, trying with trusted hosts..."
+			if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
+				error "Failed to install production dependencies"
+				info "This may be due to network connectivity or SSL certificate issues"
+				info "Try running the setup later or check your network connection"
+				success=false
+			fi
+		fi
+	elif $dev_mode || ! $production_mode; then
+		# Default to dev mode if not specified
+		if [ -f "requirements-dev.txt" ]; then
+			if ! run_command "pip install -r requirements-dev.txt" "Installing development dependencies"; then
+				warning "Standard installation failed, trying with trusted hosts..."
+				if ! run_command "pip install -r requirements-dev.txt $trusted_host_flags" "Installing development dependencies with trusted hosts"; then
+					error "Failed to install development dependencies"
+					info "This may be due to network connectivity or SSL certificate issues"
+					info "You can still use the lite server without these optional dependencies"
+					# Try installing just the core requirements
+					warning "Attempting to install core dependencies only..."
+					if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing core dependencies with trusted hosts"; then
+						success=false
+					fi
+				fi
+			fi
+		else
+			warning "requirements-dev.txt not found, installing production dependencies"
+			if ! run_command "pip install -r requirements-lite.txt" "Installing production dependencies"; then
+				warning "Standard installation failed, trying with trusted hosts..."
+				if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
+					error "Failed to install production dependencies"
+					info "This may be due to network connectivity or SSL certificate issues"
+					success=false
+				fi
+			fi
+		fi
+	fi
+
+	# Install pre-commit hooks if in dev mode
+	if command_exists pre-commit && [ -f ".pre-commit-config.yaml" ]; then
+		if ! run_command "pre-commit install" "Installing pre-commit hooks"; then
+			warning "Failed to install pre-commit hooks"
+		fi
+	fi
+else
+	info "Skipping dependency installation due to incompatible Python version"
+	info "Core functionality should still work with fallback implementations"
+fi
+
+# Set up PYTHONPATH
+export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
+
+# Test the setup - this should work even with minimal dependencies
+test_success=true
+print_color blue "Testing core functionality"
+test_output=$(python -m src.spelungit.lite_server --test 2>&1)
+if [ $? -eq 0 ]; then
+	print_color green "✓ Testing core functionality"
+else
+	print_color red "✗ Testing core functionality failed"
+	test_success=false
+	warning "Core functionality test failed"
+	echo ""
+	print_color yellow "Error details:"
+	echo "$test_output"
+	echo ""
+fi
+
+# Determine overall success
+if $success && $test_success; then
+	print_color green "✓ Setup complete!"
+	echo ""
+	print_color blue "Next steps:"
+	echo "  1. Test the installation: bin/test"
+	echo "  2. Format code: bin/fmt"
+	echo "  3. Run linting: bin/lint"
+	echo "  4. Run the installer: ./install.sh"
+elif ! $success && $test_success; then
+	print_color yellow "⚠ Setup completed with warnings"
+	echo ""
+	print_color blue "Dependencies couldn't be installed (likely network/SSL issues)"
+	print_color blue "But core functionality is working. You can:"
+	echo "  1. Test basic functionality: bin/test"
+	echo "  2. Try installing deps later when network improves"
+	echo "  3. Run the installer: ./install.sh"
+	exit 0 # Don't fail if core works
+else
+	print_color red "✗ Setup failed"
+	if ! $test_success; then
+		info "Core functionality is not working"
+		info "This is usually caused by:"
+		info "  - Incompatible Python dependencies (see error above)"
+		info "  - Missing required system libraries"
+		info "  - Virtual environment issues"
+		info ""
+		info "Try these troubleshooting steps:"
+		info "  1. Recreate virtual environment: rm -rf venv && python -m venv venv"
+		info "  2. Check Python version compatibility"
+		info "  3. Install system dependencies manually if on non-macOS"
+	fi
+	exit 1
+fi

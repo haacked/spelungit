@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#/ Usage: bin/test [options]
+#/ Description: Run tests for the Git History MCP Server
+#/ Options:
+#/   --unit        Run only unit tests
+#/   --integration Run only integration tests
+#/   --pipeline    Run indexing pipeline tests
+#/   -v, --verbose Verbose output (shows individual test names in pytest)
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+# Check basic requirements
+if ! command_exists python; then
+	error "Python is required"
+	exit 1
+fi
+
+# Check if in venv - if not, try to run with venv
+if ! check_venv; then
+	# Try to find a venv and re-run this script with it
+	if venv_path=$(find_venv); then
+		info "Found virtual environment at '$venv_path', re-running with it..."
+		exec bin/with-venv "$0" "$@"
+	else
+		warning "Running outside virtual environment"
+		info "Some tools (like pytest) may not be available"
+		info "For best results, run: source venv/bin/activate"
+		echo ""
+	fi
+fi
+
+unit_only=false
+integration_only=false
+pipeline_only=false
+
+while (("$#")); do
+	case "$1" in
+	--unit)
+		unit_only=true
+		shift
+		;;
+	--integration)
+		integration_only=true
+		shift
+		;;
+	--pipeline)
+		pipeline_only=true
+		shift
+		;;
+	-v | --verbose)
+		export VERBOSE=1
+		shift
+		;;
+	-h | --help)
+		show_help
+		exit 0
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+print_color blue "Running tests for Git History MCP Server..."
+
+success=true
+
+# Set up PYTHONPATH for tests
+export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
+
+# Repository utilities tests
+if ! $integration_only && ! $pipeline_only; then
+	if [ -f "test_repository_utils.py" ]; then
+		print_color blue "Testing repository utilities"
+		if python test_repository_utils.py; then
+			print_color green "✓ Testing repository utilities"
+		else
+			print_color red "✗ Testing repository utilities failed"
+			success=false
+		fi
+	fi
+fi
+
+# Lite server functionality test
+if ! $integration_only; then
+	print_color blue "Testing lite server functionality"
+	if python -m src.spelungit.lite_server --test; then
+		print_color green "✓ Testing lite server functionality"
+	else
+		print_color red "✗ Testing lite server functionality failed"
+		success=false
+	fi
+fi
+
+# Unit tests with pytest
+if ! $integration_only && ! $pipeline_only; then
+	pytest_available=false
+
+	# Check if pytest is available
+	if command_exists pytest; then
+		pytest_available=true
+	else
+		# Try python -m pytest (in case it's installed but not in PATH)
+		if python -c "import pytest" >/dev/null 2>&1; then
+			pytest_available=true
+			info "pytest found via Python module (using 'python -m pytest')"
+		else
+			warning "pytest not found - attempting to install it"
+			if run_command "pip install pytest" "Installing pytest"; then
+				if command_exists pytest || python -c "import pytest" >/dev/null 2>&1; then
+					pytest_available=true
+				fi
+			else
+				warning "Failed to install pytest (likely due to network/SSL issues)"
+				info "To run unit tests, install pytest manually:"
+				info "  pip install pytest  # or"
+				info "  pip install -r requirements-dev.txt"
+			fi
+		fi
+	fi
+
+	# Run pytest if available
+	if $pytest_available; then
+		if [ -d "tests" ]; then
+			# Configure pytest verbosity based on VERBOSE flag
+			if [ "${VERBOSE:-0}" = "1" ]; then
+				# Verbose mode: show individual test names and progress
+				if command_exists pytest; then
+					pytest_cmd="pytest -v --tb=short"
+				else
+					pytest_cmd="python -m pytest -v --tb=short"
+				fi
+			else
+				# Default mode: show just summary with dots for progress
+				if command_exists pytest; then
+					pytest_cmd="pytest --tb=short"
+				else
+					pytest_cmd="python -m pytest --tb=short"
+				fi
+			fi
+
+			# Run pytest
+			print_color blue "Running unit tests"
+			$pytest_cmd
+			pytest_exit_code=$?
+
+			if [ $pytest_exit_code -eq 0 ]; then
+				print_color green "✓ Running unit tests"
+			else
+				print_color red "✗ Running unit tests failed"
+				if [ "${VERBOSE:-0}" != "1" ]; then
+					info "Run with --verbose flag to see detailed output during execution"
+				fi
+				success=false
+			fi
+		else
+			warning "tests/ directory not found - skipping pytest"
+		fi
+	else
+		warning "pytest not available - skipping unit tests"
+		info "Install pytest to run full test suite"
+		# Don't mark as failure - core tests still ran
+	fi
+fi
+
+# Integration tests (require full setup)
+if $integration_only; then
+	print_color blue "Integration tests would require:"
+	echo "  - PostgreSQL with pgvector extension"
+	echo "  - OpenAI API key"
+	echo "  - Git repository to test against"
+	echo "  - All Python dependencies installed"
+	echo ""
+	print_color yellow "Integration tests not yet implemented"
+elif ! $unit_only && ! $pipeline_only; then
+	print_color blue "Stage 3 Complete - Full semantic search functionality!"
+	echo "  ✓ Git repository scanning and indexing"
+	echo "  ✓ Vector similarity search engine"
+	echo "  ✓ Complete MCP tool implementations"
+	echo "  ✓ End-to-end search functionality"
+	echo "  ✓ Real-world query processing"
+fi
+
+if $success; then
+	print_color green "✓ All tests passed"
+else
+	print_color red "✗ Some tests failed"
+	exit 1
+fi

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#/ Usage: bin/with-venv <script> [args...]
+#/ Description: Run a script within the project's virtual environment
+#/
+#/ This helper automatically finds and activates the virtual environment,
+#/ then runs the specified script with all arguments passed through.
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+if [ $# -lt 1 ]; then
+	error "Usage: $0 <script> [args...]"
+	exit 1
+fi
+
+script_name="$1"
+shift
+
+# If already in a virtual environment, just run the script
+if [ -n "$VIRTUAL_ENV" ]; then
+	exec "$script_name" "$@"
+fi
+
+# Look for virtual environment
+if ! venv_found=$(find_venv); then
+	error "No virtual environment found"
+	info "Create one with: python -m venv venv"
+	info "Then activate it: source venv/bin/activate"
+	exit 1
+fi
+
+# Activate venv and run script
+info "Activating virtual environment: $venv_found"
+exec bash -c "
+    set -e
+    source '$venv_found/bin/activate'
+    exec '$script_name' \"\$@\"
+" -- "$@"

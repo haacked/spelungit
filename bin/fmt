@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#/ Usage: bin/fmt [options]
+#/ Description: Formats Python code according to project standards
+#/ Options:
+#/   -c, --check    Check formatting without making changes
+#/   -v, --verbose  Verbose output
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+check=false
+
+while (("$#")); do
+	case "$1" in
+	-c | --check)
+		check=true
+		shift
+		;;
+	-v | --verbose)
+		export VERBOSE=1
+		shift
+		;;
+	-h | --help)
+		show_help
+		exit 0
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+if $check; then
+	print_color blue "Checking code formatting..."
+else
+	print_color blue "Formatting code..."
+fi
+
+success=true
+
+# Python formatting with ruff (preferred) or black
+if command_exists ruff; then
+	cmd="ruff format"
+	if $check; then
+		cmd="$cmd --check"
+	fi
+	print_color blue "Formatting Python with ruff"
+	print_color blue "Running: $cmd src/"
+	echo ""
+	if eval "$cmd src/"; then
+		print_color green "✓ Formatting Python with ruff"
+	else
+		print_color red "✗ Formatting Python with ruff failed"
+		success=false
+	fi
+	echo ""
+elif command_exists black; then
+	cmd="black"
+	if $check; then
+		cmd="$cmd --check"
+	fi
+	print_color blue "Formatting Python with black"
+	print_color blue "Running: $cmd src/"
+	echo ""
+	if eval "$cmd src/"; then
+		print_color green "✓ Formatting Python with black"
+	else
+		print_color red "✗ Formatting Python with black failed"
+		success=false
+	fi
+	echo ""
+else
+	warning "No Python formatter found (ruff or black)"
+fi
+
+# Python import sorting with ruff (preferred) or isort
+if command_exists ruff; then
+	cmd="ruff check --select I --fix"
+	if $check; then
+		cmd="ruff check --select I"
+	fi
+	print_color blue "Sorting Python imports with ruff"
+	print_color blue "Running: $cmd src/"
+	echo ""
+	if eval "$cmd src/"; then
+		print_color green "✓ Sorting Python imports with ruff"
+	else
+		print_color red "✗ Sorting Python imports failed"
+		success=false
+	fi
+	echo ""
+elif command_exists isort; then
+	cmd="isort"
+	if $check; then
+		cmd="$cmd --check-only"
+	fi
+	print_color blue "Sorting Python imports with isort"
+	print_color blue "Running: $cmd src/"
+	echo ""
+	if eval "$cmd src/"; then
+		print_color green "✓ Sorting Python imports with isort"
+	else
+		print_color red "✗ Sorting Python imports failed"
+		success=false
+	fi
+	echo ""
+else
+	warning "No import sorter found (ruff or isort) - skipping import sorting"
+fi
+
+# Shell scripts formatting
+if command_exists shfmt; then
+	cmd="shfmt"
+	if $check; then
+		cmd="$cmd -d"
+	else
+		cmd="$cmd -w"
+	fi
+	print_color blue "Formatting shell scripts with shfmt"
+	print_color blue "Running: $cmd bin/"
+	echo ""
+	if eval "$cmd bin/"; then
+		print_color green "✓ Formatting shell scripts with shfmt"
+	else
+		print_color red "✗ Formatting shell scripts failed"
+		success=false
+	fi
+	echo ""
+else
+	warning "shfmt not found - skipping shell script formatting"
+	info "To install shfmt: brew install shfmt  # macOS"
+	info "                 go install mvdan.cc/sh/v3/cmd/shfmt@latest  # Go"
+fi
+
+if $success; then
+	print_color green "✓ Formatting complete"
+else
+	if $check; then
+		print_color red "✗ Formatting issues found. Run 'bin/fmt' to fix."
+		exit 1
+	else
+		print_color red "✗ Some formatting failed"
+		exit 1
+	fi
+fi

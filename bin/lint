@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#/ Usage: bin/lint [options]
+#/ Description: Runs all linters and static analysis tools for Python
+#/ Options:
+#/   --fix         Automatically fix issues where possible
+#/   -v, --verbose Verbose output
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+fix=false
+
+while (("$#")); do
+	case "$1" in
+	--fix)
+		fix=true
+		shift
+		;;
+	-v | --verbose)
+		export VERBOSE=1
+		shift
+		;;
+	-h | --help)
+		show_help
+		exit 0
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+print_color blue "Running linters..."
+
+success=true
+
+# Python linting with ruff (preferred) or flake8
+if command_exists ruff; then
+	cmd="ruff check"
+	if $fix; then
+		cmd="$cmd --fix"
+	fi
+	print_color blue "Linting Python with ruff"
+	print_color blue "Running: $cmd src/"
+	echo ""
+	if eval "$cmd src/"; then
+		print_color green "✓ Linting Python with ruff"
+	else
+		print_color red "✗ Linting Python with ruff failed"
+		success=false
+	fi
+	echo ""
+elif command_exists flake8; then
+	print_color blue "Linting Python with flake8"
+	print_color blue "Running: flake8 src/"
+	echo ""
+	if flake8 src/; then
+		print_color green "✓ Linting Python with flake8"
+	else
+		print_color red "✗ Linting Python with flake8 failed"
+		success=false
+	fi
+	echo ""
+else
+	warning "No Python linter found (ruff or flake8)"
+fi
+
+# Type checking with mypy
+if command_exists mypy; then
+	if [ -f "pyproject.toml" ] || [ -f "mypy.ini" ]; then
+		print_color blue "Type checking Python with mypy"
+		print_color blue "Running: mypy src/"
+		echo ""
+		if mypy src/; then
+			print_color green "✓ Type checking Python with mypy"
+		else
+			print_color yellow "⚠ Type checking issues found - these are warnings only"
+		fi
+		echo ""
+	else
+		warning "No mypy configuration found - skipping type checking"
+	fi
+else
+	warning "mypy not found - skipping type checking"
+fi
+
+# Shell script linting
+if command_exists shellcheck; then
+	print_color blue "Linting shell scripts with shellcheck"
+	print_color blue "Running: shellcheck bin/* (excluding directories)"
+	echo ""
+	if find bin -maxdepth 1 -type f -executable | xargs shellcheck; then
+		print_color green "✓ Linting shell scripts with shellcheck"
+	else
+		print_color red "✗ Linting shell scripts failed"
+		success=false
+	fi
+	echo ""
+else
+	warning "shellcheck not found - skipping shell script linting"
+fi
+
+# Markdown linting
+if command_exists markdownlint; then
+	print_color blue "Linting Markdown with markdownlint"
+	print_color blue "Running: markdownlint '**/*.md'"
+	echo ""
+	if markdownlint '**/*.md'; then
+		print_color green "✓ Linting Markdown with markdownlint"
+	else
+		print_color yellow "⚠ Markdown linting issues found - these are warnings only"
+	fi
+	echo ""
+else
+	warning "markdownlint not found - skipping Markdown linting"
+fi
+
+if $success; then
+	print_color green "✓ All linters passed"
+else
+	print_color red "✗ Linting issues found"
+	if $fix; then
+		print_color yellow "Some issues may have been automatically fixed"
+	fi
+	exit 1
+fi

@@ -1,0 +1,18 @@
+# Lite requirements for zero-config installation
+# No PostgreSQL, no OpenAI API key required
+
+# Core MCP dependencies
+mcp>=1.0.0
+
+# Sentence transformers for local embeddings
+sentence-transformers>=3.0.0
+torch>=2.0.0
+numpy>=1.24.0
+
+# Optional performance improvements
+scikit-learn>=1.3.0  # For additional similarity metrics
+
+# Development and testing (optional)
+pytest>=7.0.0
+black>=23.0.0
+ruff>=0.1.0

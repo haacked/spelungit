@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#/ Usage: source bin/activate
+#/ Description: Activate the project's Python virtual environment
+#/
+#/ This script should be sourced, not executed:
+#/   source bin/activate
+#/ or:
+#/   . bin/activate
+
+# Check if script is being sourced (not executed)
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+	# If already in a virtual environment, show the same message as when sourcing
+	if [ -n "$VIRTUAL_ENV" ]; then
+		# Load the helper functions to use the same styling
+		SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+		source "$SCRIPT_DIR/helpers/_utils.sh"
+		info "Already in virtual environment: $VIRTUAL_ENV"
+	else
+		echo "❌ Error: This script must be sourced, not executed"
+		echo ""
+		echo "Usage:"
+		echo "  source bin/activate"
+		echo "  . bin/activate"
+		echo ""
+		echo "Do NOT run: bin/activate"
+	fi
+	exit 0
+fi
+
+# Get the script directory - handle both execution and sourcing
+if [ -n "${BASH_SOURCE[0]}" ]; then
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+	SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+source "$SCRIPT_DIR/helpers/_utils.sh"
+
+# Set the project root directory for this script
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT" || exit 1
+
+# Check if we're already in a virtual environment
+if [ -n "$VIRTUAL_ENV" ]; then
+	info "Already in virtual environment: $VIRTUAL_ENV"
+	return 0 2>/dev/null || exit 0
+fi
+
+# Find the virtual environment
+if venv_path=$(find_venv); then
+	info "Activating virtual environment: $venv_path"
+
+	# Source the activation script
+	if [[ -f "$venv_path/bin/activate" ]]; then
+		source "$venv_path/bin/activate"
+		success "Virtual environment activated"
+		info "Python path: $(which python)"
+		info "To deactivate, run: deactivate"
+	else
+		error "Virtual environment activation script not found at $venv_path/bin/activate"
+		return 1 2>/dev/null || exit 1
+	fi
+else
+	error "No virtual environment found"
+	info "Create one with: python -m venv venv"
+	return 1 2>/dev/null || exit 1
+fi

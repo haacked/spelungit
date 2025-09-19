@@ -1,0 +1,10 @@
+[bandit]
+exclude_dirs = tests,venv,.venv,env,.env
+skips = B101,B601  # Skip assert_used and shell_injection in tests
+
+# B101: Test for use of assert (we use asserts in tests)
+# B601: Test for shell injection (subprocess usage is necessary for Git operations)
+
+[bandit_assert_used]
+# Allow assert in test files
+exclude_dirs = tests

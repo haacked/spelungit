@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#/ Usage: bin/dev [command]
+#/ Description: Development helper commands
+#/ Commands:
+#/   setup          Set up development environment
+#/   test           Run tests (repository utils and lite server)
+#/   server         Test the MCP server functionality
+#/   db-info        Show database information
+#/   clean          Clean up temporary files and caches
+#/   ci             Simulate CI pipeline locally
+
+source "$(dirname "$0")/helpers/_utils.sh"
+set_source_and_root_dir
+
+command="${1:-help}"
+
+case "$command" in
+setup)
+	shift
+	exec bin/setup --dev "$@"
+	;;
+test)
+	shift
+	exec bin/test "$@"
+	;;
+server)
+	print_color blue "Testing MCP server functionality..."
+	export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
+	exec python -m src.spelungit.lite_server --test
+	;;
+db-info)
+	print_color blue "Database information:"
+	export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
+	python -c "
+import asyncio
+import sys
+sys.path.insert(0, 'src')
+from spelungit.sqlite_database import SQLiteDatabaseManager
+
+async def show_db_info():
+    db = SQLiteDatabaseManager()
+    await db.initialize()
+    info = await db.get_database_info()
+    await db.close()
+
+    print(f'Database Type: {info[\"database_type\"]}')
+    print(f'Database Path: {info[\"database_path\"]}')
+    print(f'Database Size: {info[\"database_size_mb\"]} MB')
+    print(f'Repositories: {info[\"repositories\"]}')
+    print(f'Total Commits: {info[\"total_commits\"]}')
+    print(f'Vector Search: {\"✓\" if info[\"supports_vector_search\"] else \"✗\"}')
+    print(f'Full-text Search: {\"✓\" if info[\"supports_fts\"] else \"✗\"}')
+
+asyncio.run(show_db_info())
+        "
+	;;
+clean)
+	print_color blue "Cleaning up temporary files..."
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	find . -type f -name "*.pyo" -delete 2>/dev/null || true
+	find . -type f -name ".coverage" -delete 2>/dev/null || true
+	rm -rf htmlcov/ .pytest_cache/ .mypy_cache/ dist/ build/ *.egg-info/ 2>/dev/null || true
+	print_color green "✓ Cleanup complete"
+	;;
+ci)
+	print_color blue "Simulating CI pipeline locally..."
+	success=true
+
+	if ! run_command "bin/check" "Running quality checks"; then
+		success=false
+	fi
+
+	if ! run_command "bin/test" "Running tests"; then
+		success=false
+	fi
+
+	if $success; then
+		print_color green "🎉 CI simulation passed!"
+	else
+		print_color red "❌ CI simulation failed"
+		exit 1
+	fi
+	;;
+help | --help | -h)
+	show_help
+	;;
+*)
+	print_color red "Unknown command: $command"
+	echo ""
+	show_help
+	exit 1
+	;;
+esac

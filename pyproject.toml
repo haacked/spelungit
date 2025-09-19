@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spelungit"
+version = "0.1.0"
+description = "MCP server for exploring Git history with semantic search"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "Phil Haack", email = "haacked@gmail.com" },
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "numpy>=1.24.0",
+    "python-dotenv>=1.0.0",
+    "GitPython>=3.1.40",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+full = [
+    "sentence-transformers>=2.0.0",
+    "openai>=1.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+spelungit = "spelungit.lite_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["src/spelungit/server.py"]
+per-file-ignores = {"tests/**/*.py" = ["E402"]}  # Allow imports after sys.path modifications in tests
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

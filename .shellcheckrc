@@ -1,0 +1,7 @@
+# Disable informational and style warnings that are not critical
+disable=SC1091  # Not following sourced files
+disable=SC2317  # Command appears unreachable
+disable=SC2035  # glob warnings
+disable=SC2235  # subshell style suggestions
+disable=SC2181  # $? usage style suggestions
+disable=SC2155  # Declare and assign separately style warning

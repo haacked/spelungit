@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Fetch full history for proper Git operations
+        fetch-depth: 0
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements-lite.txt', 'requirements-dev.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-lite.txt
+        pip install -r requirements-dev.txt
+
+    - name: Create test Git repository
+      run: |
+        # Set up a test Git repo for testing
+        git config --global user.email "test@example.com"
+        git config --global user.name "Test User"
+        mkdir test-repo
+        cd test-repo
+        git init
+        echo "Initial commit" > README.md
+        git add README.md
+        git commit -m "Initial commit"
+        cd ..
+
+    - name: Run repository utils tests
+      run: |
+        cd test-repo
+        python ../tests/test_repository_utils.py
+        cd ..
+
+    - name: Test lite server functionality
+      run: |
+        cd test-repo
+        python -m spelungit.lite_server --test
+        cd ..
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+
+    - name: Run pytest
+      run: |
+        pytest tests/ -v --tb=short
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.13"
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-quality-${{ hashFiles('requirements-dev.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-quality-
+
+    - name: Install development dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+
+    - name: Run code formatting check
+      run: |
+        bin/fmt --check
+
+    - name: Run linting
+      run: |
+        bin/lint
+
+    - name: Run all quality checks
+      run: |
+        bin/check
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.13"
+
+    - name: Install security scanning tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit safety
+
+    - name: Run bandit security scan
+      run: |
+        bandit -r src/ -f json -o bandit-report.json || true
+        bandit -r src/ --severity-level medium
+
+    - name: Check for known security vulnerabilities
+      run: |
+        safety check --json --output safety-report.json || true
+        safety check
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [test, quality, security]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.13"
+
+    - name: Test installation script
+      run: |
+        chmod +x install.sh
+        # Test dry run mode
+        ./install.sh --dry-run
+
+    - name: Test development scripts
+      run: |
+        python -m venv venv
+        source venv/bin/activate
+        pip install -r requirements-dev.txt
+        bin/dev server
+        bin/check
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: [test, quality]
+    strategy:
+      matrix:
+        repo-type: ["simple", "worktree"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.13"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-lite.txt
+
+    - name: Set up test repository (${{ matrix.repo-type }})
+      run: |
+        git config --global user.email "test@example.com"
+        git config --global user.name "Test User"
+
+        if [ "${{ matrix.repo-type }}" = "simple" ]; then
+          # Simple repository
+          mkdir test-repo
+          cd test-repo
+          git init
+          for i in {1..10}; do
+            echo "Commit $i content" > file$i.txt
+            git add file$i.txt
+            git commit -m "Add file $i with some test content"
+          done
+
+        elif [ "${{ matrix.repo-type }}" = "worktree" ]; then
+          # Repository with worktrees
+          mkdir main-repo
+          cd main-repo
+          git init
+          echo "Main branch" > main.txt
+          git add main.txt
+          git commit -m "Initial commit on main"
+
+          # Create a worktree
+          git worktree add ../worktree-branch feature-branch
+          cd ../worktree-branch
+          echo "Feature branch" > feature.txt
+          git add feature.txt
+          git commit -m "Add feature file"
+
+          # Test from worktree directory
+          cd ../worktree-branch
+        fi
+
+    - name: Test repository detection and indexing
+      run: |
+        if [ "${{ matrix.repo-type }}" = "simple" ]; then
+          cd test-repo
+        else
+          cd worktree-branch
+        fi
+
+        # Test repository detection
+        python -m spelungit.lite_server --test
+
+        # Test basic functionality without full MCP stack
+        python -c "
+        import sys, os, asyncio;
+        sys.path.insert(0, '${{ github.workspace }}/src');
+        from spelungit.sqlite_database import SQLiteDatabaseManager;
+        from spelungit.lite_embeddings import LiteEmbeddingManager;
+        from spelungit.repository_utils import get_repository_info;
+        async def test():
+            print('Testing repository detection...');
+            info = get_repository_info('.');
+            print(f'Repository info: {info}');
+            print('Testing database initialization...');
+            db = SQLiteDatabaseManager();
+            await db.initialize();
+            print('Testing embedding generation...');
+            em = LiteEmbeddingManager();
+            embedding = await em.generate_embedding('test commit message');
+            print(f'Generated embedding dimension: {len(embedding)}');
+            await db.close();
+            print('✅ Integration test passed');
+        asyncio.run(test())
+        "
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
