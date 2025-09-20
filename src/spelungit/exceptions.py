@@ -7,11 +7,17 @@ from typing import Optional
 
 # Import from new error system for better functionality
 from .errors import DatabaseConnectionError as NewDatabaseConnectionError
-from .errors import DatabaseError, EmbeddingError, ErrorCategory, GitOperationError
+from .errors import (
+    DatabaseError,
+    EmbeddingError,
+    ErrorCategory,
+    GitOperationError,
+    SpelunkError,
+    ValidationError,
+)
 from .errors import RepositoryIndexingError as NewRepositoryIndexingError
 from .errors import RepositoryNotFoundError as NewRepositoryNotFoundError
 from .errors import RepositoryNotIndexedError as NewRepositoryNotIndexedError
-from .errors import SpelunkError, ValidationError
 
 
 # Backward compatibility aliases - these maintain the old interface

@@ -323,11 +323,12 @@ class LiteEmbeddingManager:
         """Generate hybrid embedding combining semantic + code patterns."""
 
         # Step 1: Get base semantic embedding
+        base_embedding: List[float]
         if self.model:
-            try:  # type: ignore[unreachable]
+            try:
                 # Use sentence transformer for semantic understanding
-                base_embedding = self.model.encode(text, convert_to_numpy=True)
-                base_embedding = base_embedding.tolist()
+                embedding_array = self.model.encode(text, convert_to_numpy=True)
+                base_embedding = embedding_array.tolist()
             except Exception as e:
                 logger.error(f"Error generating embedding: {e}")
                 base_embedding = self._fallback_embedding(text)
@@ -363,6 +364,6 @@ class LiteEmbeddingManager:
     def model_info(self) -> str:
         """Get model information."""
         if self.model:
-            return f"sentence-transformers/{self.model_name} + code patterns"  # type: ignore[unreachable]
+            return f"sentence-transformers/{self.model_name} + code patterns"
         else:
             return "fallback-embeddings + code patterns"

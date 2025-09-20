@@ -12,53 +12,18 @@ repos:
       - id: debug-statements
       - id: check-docstring-first
 
-  - repo: https://github.com/psf/black
-    rev: 23.7.0
-    hooks:
-      - id: black
-        language_version: python3
-        args: [--line-length=100]
-
-  # Temporarily disabled due to version compatibility with local ruff
-  # - repo: https://github.com/charliermarsh/ruff-pre-commit
-  #   rev: v0.0.287
-  #   hooks:
-  #     - id: ruff
-  #       args: [--fix]
-
-  # Temporarily disabled due to version compatibility issues
-  # - repo: https://github.com/pre-commit/mirrors-mypy
-  #   rev: v1.5.1
-  #   hooks:
-  #     - id: mypy
-  #       additional_dependencies: [types-requests]
-  #       args: [--ignore-missing-imports, --no-strict-optional]
-  #       files: ^src/
-
-  # - repo: https://github.com/PyCQA/bandit
-  #   rev: 1.7.5
-  #   hooks:
-  #     - id: bandit
-  #       args: [-c, .bandit]
-  #       files: ^src/
-
-  - repo: https://github.com/pycqa/isort
-    rev: 5.12.0
-    hooks:
-      - id: isort
-        name: isort (python)
-        args: [--profile, black, --line-length, "100"]
-
-  # Temporarily disabled due to package warnings
-  # - repo: https://github.com/econchick/interrogate
-  #   rev: 1.5.0
-  #   hooks:
-  #     - id: interrogate
-  #       args: [--quiet, --fail-under=80]
-  #       files: ^src/
+  # Use bin/check for all formatting, linting, and type checking
+  # This prevents tool conflicts and ensures consistency
 
   - repo: local
     hooks:
+      - id: quality-check
+        name: quality-check (formatting, linting, type checking)
+        entry: bin/check
+        language: system
+        pass_filenames: false
+        files: '^.+\.py$'
+        args: [--fix]
       - id: pytest-check
         name: pytest-check
         entry: bin/test

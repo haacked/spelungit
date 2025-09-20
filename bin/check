@@ -94,17 +94,8 @@ fi
 
 info "Security checks temporarily disabled due to dependency issues"
 
-# Pre-commit hooks (if available)
-if command_exists pre-commit && [ -f ".pre-commit-config.yaml" ]; then
-	if ! run_command "pre-commit run --all-files" "Running pre-commit hooks"; then
-		warning "Pre-commit hooks found issues"
-		# Don't fail on pre-commit warnings in check mode
-		if $fix_mode; then
-			# Only fail in fix mode if critical
-			success=false
-		fi
-	fi
-fi
+# Pre-commit hooks removed - now pre-commit calls this script instead
+# This prevents circular dependency and tool conflicts
 
 if $success; then
 	print_color green "✓ All quality checks passed"

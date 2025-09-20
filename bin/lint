@@ -89,7 +89,7 @@ if command_exists shellcheck; then
 	print_color blue "Linting shell scripts with shellcheck"
 	print_color blue "Running: shellcheck bin/* (excluding directories)"
 	echo ""
-	if find bin -maxdepth 1 -type f -executable | xargs shellcheck; then
+	if find bin -maxdepth 1 -type f -perm +111 -print0 | xargs -0 shellcheck; then
 		print_color green "✓ Linting shell scripts with shellcheck"
 	else
 		print_color red "✗ Linting shell scripts failed"
