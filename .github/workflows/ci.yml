@@ -207,8 +207,8 @@ jobs:
           git add main.txt
           git commit -m "Initial commit on main"
 
-          # Create a worktree
-          git worktree add ../worktree-branch feature-branch
+          # Create a worktree with new branch (more typical usage)
+          git worktree add -b feature-branch ../worktree-branch
           cd ../worktree-branch
           echo "Feature branch" > feature.txt
           git add feature.txt
