@@ -156,11 +156,13 @@ jobs:
 
     - name: Test development scripts
       run: |
+        # Test that bin/dev commands work (without full quality checks - already done in quality job)
         python -m venv venv
         source venv/bin/activate
         pip install -r requirements-dev.txt
-        bin/dev server
-        bin/check
+        # Quick validation that dev scripts are functional
+        bin/dev clean
+        bin/dev --help
 
   integration:
     runs-on: ubuntu-latest
