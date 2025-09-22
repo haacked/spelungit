@@ -60,6 +60,9 @@ logs/
 .tox/
 htmlcov/
 
+# Security scanning reports
+bandit-report.json
+
 # Documentation
 docs/_build/
 
