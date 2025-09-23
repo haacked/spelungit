@@ -361,10 +361,37 @@ class LiteSearchEngine:
 
         except Exception as e:
             logger.error(f"Background indexing failed for {repository_id}: {e}")
-            await self.db.update_repository_status(
-                repository_id,
-                RepositoryStatus.INDEXED,  # Revert to previous status
-            )
+
+            # Determine if we should preserve partial progress or revert completely
+            commits_processed = 0
+            if repository_id in self._background_progress:
+                commits_processed = self._background_progress[repository_id].get(
+                    "commits_processed", 0
+                )
+
+            # Preserve partial progress if some commits were successfully indexed
+            if commits_processed > 0:
+                logger.info(f"Preserving partial progress: {commits_processed} commits indexed")
+                # Update repository status with current count and error message
+                total_count = await self.db.get_commit_count(repository_id)
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=total_count,
+                    error_message=f"Partial indexing completed: {commits_processed} commits. Error: {str(e)[:200]}",
+                )
+            else:
+                # No progress made, revert to previous state
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,  # Revert to previous status
+                    error_message=f"Background indexing failed: {str(e)[:200]}",
+                )
+
+            # Clear staleness cache to force re-evaluation
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
             # Clean up progress tracking on error
             if repository_id in self._background_progress:
                 del self._background_progress[repository_id]
@@ -372,6 +399,42 @@ class LiteSearchEngine:
             # Clean up the task reference
             if repository_id in self._background_tasks:
                 del self._background_tasks[repository_id]
+
+    def _is_transient_error(self, error: Exception) -> bool:
+        """Determine if an error is likely transient and worth retrying."""
+        error_str = str(error).lower()
+        transient_indicators = [
+            "timeout",
+            "connection",
+            "network",
+            "temporary",
+            "unavailable",
+            "busy",
+            "locked",
+            "permission denied",
+        ]
+        return any(indicator in error_str for indicator in transient_indicators)
+
+    async def _start_background_indexing_with_retry(
+        self, repository_id: str, repository, max_retries: int = 2, base_delay: float = 2.0
+    ) -> None:
+        """Start background indexing with retry logic for transient failures."""
+        for attempt in range(max_retries + 1):
+            try:
+                await self._start_background_indexing(repository_id, repository)
+                return  # Success, no need to retry
+            except Exception as e:
+                if attempt == max_retries or not self._is_transient_error(e):
+                    # Final attempt or non-transient error, re-raise
+                    raise
+
+                # Wait before retrying with exponential backoff
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"Background indexing attempt {attempt + 1} failed for {repository_id}: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
 
     def get_background_task_progress(self, repository_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed progress information for a background indexing task."""
@@ -404,6 +467,58 @@ class LiteSearchEngine:
             progress_info["eta_human"] = "unknown"
 
         return progress_info
+
+    async def _validate_and_repair_repository_state(self, repository_id: str, repository) -> bool:
+        """Validate repository state and attempt to repair inconsistencies."""
+        try:
+            # Check if repository status is consistent with database state
+            commit_count = await self.db.get_commit_count(repository_id)
+
+            # If repository shows as INDEXED but has no commits, mark as not indexed
+            if repository.status == RepositoryStatus.INDEXED and commit_count == 0:
+                logger.warning(
+                    f"Repository {repository_id} marked as INDEXED but has no commits. Resetting state."
+                )
+                await self.db.update_repository_status(repository_id, RepositoryStatus.NOT_INDEXED)
+                return False
+
+            # If repository shows as INDEXING but no active background task, reset to appropriate state
+            if (
+                repository.status == RepositoryStatus.INDEXING
+                and repository_id not in self._background_tasks
+            ):
+                logger.warning(
+                    f"Repository {repository_id} marked as INDEXING but no active task. Resetting state."
+                )
+                if commit_count > 0:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.INDEXED, commit_count=commit_count
+                    )
+                else:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.NOT_INDEXED
+                    )
+                return True
+
+            # If repository shows as FAILED, clear error if we can proceed
+            if repository.status == RepositoryStatus.FAILED:
+                logger.info(
+                    f"Repository {repository_id} was in FAILED state. Attempting to recover."
+                )
+                if commit_count > 0:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.INDEXED, commit_count=commit_count
+                    )
+                else:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.NOT_INDEXED
+                    )
+                return True
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to validate/repair repository state for {repository_id}: {e}")
+            return False
 
     async def _check_and_update_if_stale(self, repository_id: str, repository) -> Dict[str, Any]:
         """Check if index is stale and update appropriately.
@@ -451,8 +566,10 @@ class LiteSearchEngine:
                 f"Starting background indexing for {commit_gap} new commits (≥{self.background_threshold})"
             )
 
-            # Start background task (fire and forget) and track it
-            task = asyncio.create_task(self._start_background_indexing(repository_id, repository))
+            # Start background task with retry logic (fire and forget) and track it
+            task = asyncio.create_task(
+                self._start_background_indexing_with_retry(repository_id, repository)
+            )
             self._background_tasks[repository_id] = task
 
             result["background"] = True
@@ -549,9 +666,16 @@ class LiteSearchEngine:
 
         except Exception as e:
             logger.error(f"Auto-update failed for {repository_id}: {e}")
+
+            # Clear staleness cache to force re-evaluation on next attempt
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            # Update repository status with error information
             await self.db.update_repository_status(
                 repository_id,
                 RepositoryStatus.INDEXED,  # Revert to previous status
+                error_message=f"Auto-update failed: {str(e)[:200]}",
             )
             return result
 
@@ -566,6 +690,24 @@ class LiteSearchEngine:
 
         # Detect repository context
         repository_id, repository = await self._detect_repository_context(repository_path)
+
+        # Validate and repair repository state if needed (with timeout)
+        try:
+            await asyncio.wait_for(
+                self._validate_and_repair_repository_state(repository_id, repository), timeout=5.0
+            )
+            # Refresh repository info after potential state repair
+            repository = await self.db.get_or_create_repository(
+                repository_id, repository.canonical_path
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"State validation timed out for {repository_id}, proceeding with current state"
+            )
+        except Exception as e:
+            logger.warning(
+                f"State validation failed for {repository_id}: {e}, proceeding with current state"
+            )
 
         # Check repository status
         if repository.status == RepositoryStatus.NOT_INDEXED:

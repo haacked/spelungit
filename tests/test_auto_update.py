@@ -239,33 +239,37 @@ class TestAutoUpdate:
         repository.status = RepositoryStatus.INDEXED
 
         with patch.object(search_engine, '_detect_repository_context') as mock_detect:
-            with patch.object(search_engine, '_check_and_update_if_stale') as mock_auto_update:
-                with patch.object(search_engine.embeddings, 'generate_embedding') as mock_embedding:
-                    with patch.object(search_engine.db, 'search_commits') as mock_search:
-                        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
-                            # Setup mocks
-                            mock_detect.return_value = (repo_id, repository)
-                            mock_auto_update.return_value = {
-                                "updated": True,
-                                "background": False,
-                                "commit_gap": 3,
-                                "warning_message": ""
-                            }
-                            mock_embedding.return_value = [0.1, 0.2, 0.3]
-                            mock_search.return_value = []
+            with patch.object(search_engine, '_validate_and_repair_repository_state') as mock_validate:
+                with patch.object(search_engine.db, 'get_or_create_repository') as mock_get_repo:
+                    with patch.object(search_engine, '_check_and_update_if_stale') as mock_auto_update:
+                        with patch.object(search_engine.embeddings, 'generate_embedding') as mock_embedding:
+                            with patch.object(search_engine.db, 'search_commits') as mock_search:
+                                with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+                                    # Setup mocks
+                                    mock_detect.return_value = (repo_id, repository)
+                                    mock_validate.return_value = True
+                                    mock_get_repo.return_value = repository
+                                    mock_auto_update.return_value = {
+                                        "updated": True,
+                                        "background": False,
+                                        "commit_gap": 3,
+                                        "warning_message": ""
+                                    }
+                                    mock_embedding.return_value = [0.1, 0.2, 0.3]
+                                    mock_search.return_value = []
 
-                            mock_repo_instance = AsyncMock()
-                            mock_repo_instance.get_commit_info.return_value = {
-                                "message": "test", "author": "test", "date": "2023-01-01",
-                                "files_changed": []
-                            }
-                            mock_git_repo.return_value = mock_repo_instance
+                                    mock_repo_instance = AsyncMock()
+                                    mock_repo_instance.get_commit_info.return_value = {
+                                        "message": "test", "author": "test", "date": "2023-01-01",
+                                        "files_changed": []
+                                    }
+                                    mock_git_repo.return_value = mock_repo_instance
 
-                            # Perform search
-                            results = await search_engine.search_commits("test query")
+                                    # Perform search
+                                    results = await search_engine.search_commits("test query")
 
-                            # Verify auto-update was called
-                            mock_auto_update.assert_called_once_with(repo_id, repository)
+                                    # Verify auto-update was called
+                                    mock_auto_update.assert_called_once_with(repo_id, repository)
 
     @pytest.mark.asyncio
     async def test_configuration_changes(self, search_engine):
