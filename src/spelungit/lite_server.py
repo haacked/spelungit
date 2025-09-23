@@ -127,6 +127,8 @@ class LiteSearchEngine:
         self._staleness_cache = {}
         # Track active background indexing tasks to prevent race conditions
         self._background_tasks = {}
+        # Lock for atomic task management to prevent race conditions
+        self._task_lock = asyncio.Lock()
         # Track progress and metadata for background tasks
         self._background_progress = {}
         # Configuration for auto-updates
@@ -396,9 +398,10 @@ class LiteSearchEngine:
             if repository_id in self._background_progress:
                 del self._background_progress[repository_id]
         finally:
-            # Clean up the task reference
-            if repository_id in self._background_tasks:
-                del self._background_tasks[repository_id]
+            # Clean up the task reference with lock protection
+            async with self._task_lock:
+                if repository_id in self._background_tasks:
+                    del self._background_tasks[repository_id]
 
     def _is_transient_error(self, error: Exception) -> bool:
         """Determine if an error is likely transient and worth retrying."""
@@ -546,31 +549,37 @@ class LiteSearchEngine:
             return result
 
         if commit_gap >= self.background_threshold:
-            # Check if background task is already running for this repository
-            if repository_id in self._background_tasks:
-                task = self._background_tasks[repository_id]
-                if not task.done():
-                    # Task already running, return info about it
-                    result["background"] = True
-                    result["warning_message"] = (
-                        f"Background indexing already in progress for {commit_gap} new commits. "
-                        f"Search results may not include the latest commits until indexing completes."
-                    )
-                    return result
-                else:
-                    # Task completed, clean it up
-                    del self._background_tasks[repository_id]
+            # Use lock to ensure atomic task management and prevent race conditions
+            async with self._task_lock:
+                # Check if background task is already running for this repository
+                if repository_id in self._background_tasks:
+                    task = self._background_tasks[repository_id]
+                    if not task.done():
+                        # Task already running, return info about it
+                        result["background"] = True
+                        result["warning_message"] = (
+                            f"Background indexing already in progress for {commit_gap} new commits. "
+                            f"Search results may not include the latest commits until indexing completes."
+                        )
+                        return result
+                    else:
+                        # Task completed, clean it up and handle any exceptions
+                        try:
+                            await task  # Ensure any exceptions are handled
+                        except Exception as e:
+                            logger.warning(f"Previous background task failed: {e}")
+                        del self._background_tasks[repository_id]
 
-            # Start background indexing for large gaps
-            logger.info(
-                f"Starting background indexing for {commit_gap} new commits (≥{self.background_threshold})"
-            )
+                # Start background indexing for large gaps
+                logger.info(
+                    f"Starting background indexing for {commit_gap} new commits (≥{self.background_threshold})"
+                )
 
-            # Start background task with retry logic (fire and forget) and track it
-            task = asyncio.create_task(
-                self._start_background_indexing_with_retry(repository_id, repository)
-            )
-            self._background_tasks[repository_id] = task
+                # Start background task with retry logic (fire and forget) and track it
+                task = asyncio.create_task(
+                    self._start_background_indexing_with_retry(repository_id, repository)
+                )
+                self._background_tasks[repository_id] = task
 
             result["background"] = True
 
