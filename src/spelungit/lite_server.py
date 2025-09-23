@@ -127,6 +127,8 @@ class LiteSearchEngine:
         self._staleness_cache = {}
         # Track active background indexing tasks to prevent race conditions
         self._background_tasks = {}
+        # Track progress and metadata for background tasks
+        self._background_progress = {}
         # Configuration for auto-updates
         self.background_threshold = 50  # Commits threshold for background vs foreground indexing
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes
@@ -223,6 +225,18 @@ class LiteSearchEngine:
         """Start background indexing for large commit gaps."""
         try:
             logger.info(f"Starting background indexing for {repository_id}")
+
+            # Initialize progress tracking
+            self._background_progress[repository_id] = {
+                "started_at": datetime.now(),
+                "phase": "initializing",
+                "commits_processed": 0,
+                "total_commits": 0,
+                "current_batch": 0,
+                "total_batches": 0,
+                "last_updated": datetime.now(),
+            }
+
             await self.db.update_repository_status(
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
@@ -234,15 +248,33 @@ class LiteSearchEngine:
             commits = await self._with_git_repo(repository.canonical_path, get_commits)
 
             if not commits:
+                # Update progress tracking for empty commit set
+                self._background_progress[repository_id].update(
+                    {"phase": "completed", "last_updated": datetime.now()}
+                )
                 await self.db.update_repository_status(
                     repository_id,
                     RepositoryStatus.INDEXED,
                     commit_count=await self.db.get_commit_count(repository_id),
                 )
+                # Clean up progress tracking
+                if repository_id in self._background_progress:
+                    del self._background_progress[repository_id]
                 return
 
             total_commits = len(commits)
             batch_size = 20  # Smaller batches for background processing
+            total_batches = (total_commits + batch_size - 1) // batch_size
+
+            # Update progress tracking with commit details
+            self._background_progress[repository_id].update(
+                {
+                    "phase": "processing",
+                    "total_commits": total_commits,
+                    "total_batches": total_batches,
+                    "last_updated": datetime.now(),
+                }
+            )
 
             # Process commits in batches
             for i in range(0, total_commits, batch_size):
@@ -283,6 +315,18 @@ class LiteSearchEngine:
                 # Update progress
                 processed = min(i + batch_size, total_commits)
                 progress = int((processed / total_commits) * 100)
+                current_batch = (i // batch_size) + 1
+
+                # Update detailed progress tracking
+                self._background_progress[repository_id].update(
+                    {
+                        "commits_processed": processed,
+                        "current_batch": current_batch,
+                        "progress_percent": progress,
+                        "last_updated": datetime.now(),
+                    }
+                )
+
                 await self.db.update_repository_status(
                     repository_id, RepositoryStatus.INDEXING, progress=progress
                 )
@@ -300,9 +344,20 @@ class LiteSearchEngine:
             if repository_id in self._staleness_cache:
                 del self._staleness_cache[repository_id]
 
-            logger.info(
-                f"✅ Background indexing completed for {repository_id}: {len(commits)} commits"
-            )
+            # Mark progress as completed and calculate duration
+            if repository_id in self._background_progress:
+                progress_info = self._background_progress[repository_id]
+                duration = datetime.now() - progress_info["started_at"]
+                logger.info(
+                    f"✅ Background indexing completed for {repository_id}: "
+                    f"{len(commits)} commits in {duration.total_seconds():.1f}s"
+                )
+                # Clean up progress tracking
+                del self._background_progress[repository_id]
+            else:
+                logger.info(
+                    f"✅ Background indexing completed for {repository_id}: {len(commits)} commits"
+                )
 
         except Exception as e:
             logger.error(f"Background indexing failed for {repository_id}: {e}")
@@ -310,10 +365,45 @@ class LiteSearchEngine:
                 repository_id,
                 RepositoryStatus.INDEXED,  # Revert to previous status
             )
+            # Clean up progress tracking on error
+            if repository_id in self._background_progress:
+                del self._background_progress[repository_id]
         finally:
             # Clean up the task reference
             if repository_id in self._background_tasks:
                 del self._background_tasks[repository_id]
+
+    def get_background_task_progress(self, repository_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed progress information for a background indexing task."""
+        if repository_id not in self._background_progress:
+            return None
+
+        progress_info = self._background_progress[repository_id].copy()
+
+        # Calculate elapsed time
+        elapsed = datetime.now() - progress_info["started_at"]
+        progress_info["elapsed_seconds"] = elapsed.total_seconds()
+
+        # Calculate estimated time remaining (if we have processed some commits)
+        if progress_info["commits_processed"] > 0:
+            commits_per_second = progress_info["commits_processed"] / elapsed.total_seconds()
+            remaining_commits = progress_info["total_commits"] - progress_info["commits_processed"]
+            if commits_per_second > 0:
+                eta_seconds = remaining_commits / commits_per_second
+                progress_info["eta_seconds"] = eta_seconds
+            else:
+                progress_info["eta_seconds"] = None
+        else:
+            progress_info["eta_seconds"] = None
+
+        # Format times for human readability
+        progress_info["elapsed_human"] = f"{elapsed.total_seconds():.1f}s"
+        if progress_info["eta_seconds"]:
+            progress_info["eta_human"] = f"{progress_info['eta_seconds']:.1f}s"
+        else:
+            progress_info["eta_human"] = "unknown"
+
+        return progress_info
 
     async def _check_and_update_if_stale(self, repository_id: str, repository) -> Dict[str, Any]:
         """Check if index is stale and update appropriately.
@@ -366,10 +456,25 @@ class LiteSearchEngine:
             self._background_tasks[repository_id] = task
 
             result["background"] = True
-            result["warning_message"] = (
-                f"Found {commit_gap} new commits. Indexing in background - "
-                f"search results may not include the latest commits until indexing completes."
-            )
+
+            # Check if we have progress information for enhanced warning
+            progress_info = self.get_background_task_progress(repository_id)
+            if progress_info and progress_info["commits_processed"] > 0:
+                # Background task is actively running
+                percent = progress_info.get("progress_percent", 0)
+                processed = progress_info["commits_processed"]
+                total = progress_info["total_commits"]
+                eta = progress_info["eta_human"]
+                result["warning_message"] = (
+                    f"Background indexing in progress: {processed}/{total} commits ({percent}%) - "
+                    f"ETA: {eta}. Search results may not include the latest commits."
+                )
+            else:
+                # Just starting background indexing
+                result["warning_message"] = (
+                    f"Found {commit_gap} new commits. Indexing in background - "
+                    f"search results may not include the latest commits until indexing completes."
+                )
             return result
 
         # Foreground indexing for smaller gaps
@@ -963,6 +1068,18 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                             status_text += "\n**Index Status:** Up to date"
                     except Exception as e:
                         logger.warning(f"Could not check staleness for status: {e}")
+
+                # Add background task progress if available
+                progress_info = search_engine.get_background_task_progress(repository_id)
+                if progress_info:
+                    status_text += "\n\n**Background Indexing:**"
+                    status_text += f"\n• Phase: {progress_info['phase']}"
+                    status_text += f"\n• Progress: {progress_info['commits_processed']}/{progress_info['total_commits']} commits"
+                    if progress_info.get("progress_percent"):
+                        status_text += f" ({progress_info['progress_percent']}%)"
+                    status_text += f"\n• Batch: {progress_info['current_batch']}/{progress_info['total_batches']}"
+                    status_text += f"\n• Elapsed: {progress_info['elapsed_human']}"
+                    status_text += f"\n• ETA: {progress_info['eta_human']}"
 
                 # Add auto-update configuration info
                 status_text += (
