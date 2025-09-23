@@ -163,22 +163,6 @@ class LiteSearchEngine:
             # but we ensure no lingering references
             git_repo = None
 
-    async def _get_head_commit_date(self, repo_path: str) -> Optional[datetime]:
-        """Get the date of the HEAD commit in the repository."""
-
-        async def get_date(git_repo):
-            output = await git_repo._run_git_command(["log", "-1", "--format=%at", "HEAD"])
-            if output.strip():
-                timestamp = int(output.strip())
-                return datetime.fromtimestamp(timestamp)
-            return None
-
-        try:
-            return await self._with_git_repo(repo_path, get_date)
-        except Exception as e:
-            logger.warning(f"Could not get HEAD commit date for {repo_path}: {e}")
-            return None
-
     async def _is_index_stale(self, repository_id: str, repo_path: str) -> Tuple[bool, int]:
         """Check if the index is stale and return commit gap count."""
         cache_key = repository_id
@@ -192,36 +176,35 @@ class LiteSearchEngine:
                 return cached_data
 
         try:
-            # Get latest indexed commit date
-            latest_indexed_date = await self.db.get_latest_commit_date(repository_id)
-            if not latest_indexed_date:
+            # Get latest indexed commit SHA
+            latest_indexed_sha = await self.db.get_latest_commit_sha(repository_id)
+            if not latest_indexed_sha:
                 # No commits indexed yet
                 result = (True, -1)  # -1 indicates full index needed
                 self._staleness_cache[cache_key] = (result, now)
                 return result
 
-            # Get HEAD commit date
-            head_commit_date = await self._get_head_commit_date(repo_path)
-            if not head_commit_date:
-                # Can't determine HEAD, assume not stale
-                result = (False, 0)
-                self._staleness_cache[cache_key] = (result, now)
-                return result
-
-            # Check if HEAD is newer than latest indexed
-            if head_commit_date <= latest_indexed_date:
-                # Index is up to date
-                result = (False, 0)
-                self._staleness_cache[cache_key] = (result, now)
-                return result
-
-            # Count commits between latest indexed and HEAD
+            # Count commits between latest indexed SHA and HEAD
             async def count_commits(git_repo):
-                since_date_iso = latest_indexed_date.isoformat()
-                output = await git_repo._run_git_command(
-                    ["rev-list", "--count", f"--since={since_date_iso}", "HEAD"]
-                )
-                return int(output.strip()) if output.strip() else 0
+                try:
+                    # Use SHA-based range: count commits from latest_sha..HEAD
+                    output = await git_repo._run_git_command(
+                        ["rev-list", "--count", f"{latest_indexed_sha}..HEAD"]
+                    )
+                    return int(output.strip()) if output.strip() else 0
+                except Exception as e:
+                    logger.warning(f"Failed to count commits using SHA range: {e}")
+                    # Fallback: just check if HEAD exists and is different
+                    try:
+                        head_sha = await git_repo._run_git_command(["rev-parse", "HEAD"])
+                        head_sha = head_sha.strip()
+                        if head_sha == latest_indexed_sha:
+                            return 0
+                        else:
+                            # We know there's at least one new commit, but can't count exactly
+                            return 1
+                    except Exception:
+                        return 0
 
             commit_gap = await self._with_git_repo(repo_path, count_commits)
 

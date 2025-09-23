@@ -95,10 +95,11 @@ class TestAutoUpdate:
         """Test staleness detection when index is up to date."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch.object(search_engine, '_get_head_commit_date') as mock_head_date:
-            # Set HEAD commit to be older than latest indexed commit
-            latest_indexed = await search_engine.db.get_latest_commit_date(repo_id)
-            mock_head_date.return_value = latest_indexed - timedelta(hours=1)
+        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+            # Mock git rev-list to return 0 new commits (up to date)
+            mock_repo_instance = AsyncMock()
+            mock_repo_instance._run_git_command.return_value = "0"
+            mock_git_repo.return_value = mock_repo_instance
 
             is_stale, commit_gap = await search_engine._is_index_stale(repo_id, canonical_path)
 
@@ -110,47 +111,38 @@ class TestAutoUpdate:
         """Test staleness detection when index is stale."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch.object(search_engine, '_get_head_commit_date') as mock_head_date:
-            with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
-                # Set HEAD commit to be newer than latest indexed commit
-                latest_indexed = await search_engine.db.get_latest_commit_date(repo_id)
-                mock_head_date.return_value = latest_indexed + timedelta(hours=1)
+        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+            # Mock git rev-list to return 3 new commits
+            mock_repo_instance = AsyncMock()
+            mock_repo_instance._run_git_command.return_value = "3"
+            mock_git_repo.return_value = mock_repo_instance
 
-                # Mock git rev-list to return 3 new commits
-                mock_repo_instance = AsyncMock()
-                mock_repo_instance._run_git_command.return_value = "3"
-                mock_git_repo.return_value = mock_repo_instance
+            is_stale, commit_gap = await search_engine._is_index_stale(repo_id, canonical_path)
 
-                is_stale, commit_gap = await search_engine._is_index_stale(repo_id, canonical_path)
-
-                assert is_stale
-                assert commit_gap == 3
+            assert is_stale
+            assert commit_gap == 3
 
     @pytest.mark.asyncio
     async def test_staleness_cache(self, search_engine, mock_repository):
         """Test that staleness checks are cached properly."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch.object(search_engine, '_get_head_commit_date') as mock_head_date:
-            with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
-                latest_indexed = await search_engine.db.get_latest_commit_date(repo_id)
-                mock_head_date.return_value = latest_indexed + timedelta(hours=1)
+        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+            mock_repo_instance = AsyncMock()
+            mock_repo_instance._run_git_command.return_value = "2"
+            mock_git_repo.return_value = mock_repo_instance
 
-                mock_repo_instance = AsyncMock()
-                mock_repo_instance._run_git_command.return_value = "2"
-                mock_git_repo.return_value = mock_repo_instance
+            # First call should hit the git command
+            is_stale1, commit_gap1 = await search_engine._is_index_stale(repo_id, canonical_path)
 
-                # First call should hit the git command
-                is_stale1, commit_gap1 = await search_engine._is_index_stale(repo_id, canonical_path)
+            # Second call should use cache (git command shouldn't be called again)
+            is_stale2, commit_gap2 = await search_engine._is_index_stale(repo_id, canonical_path)
 
-                # Second call should use cache (git command shouldn't be called again)
-                is_stale2, commit_gap2 = await search_engine._is_index_stale(repo_id, canonical_path)
+            assert is_stale1 == is_stale2 == True
+            assert commit_gap1 == commit_gap2 == 2
 
-                assert is_stale1 == is_stale2 == True
-                assert commit_gap1 == commit_gap2 == 2
-
-                # Git command should only have been called once due to caching
-                assert mock_repo_instance._run_git_command.call_count == 1
+            # Git command should only have been called once due to caching
+            assert mock_repo_instance._run_git_command.call_count == 1
 
     @pytest.mark.asyncio
     async def test_auto_update_disabled(self, search_engine, mock_repository):
