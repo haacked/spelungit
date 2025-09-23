@@ -149,15 +149,32 @@ class LiteSearchEngine:
 
         return repository_id, repository
 
-    async def _get_head_commit_date(self, repo_path: str) -> Optional[datetime]:
-        """Get the date of the HEAD commit in the repository."""
+    async def _with_git_repo(self, repo_path: str, operation):
+        """Execute an operation with a GitRepository instance, ensuring proper resource management."""
+        git_repo = None
         try:
             git_repo = GitRepository(repo_path)
+            return await operation(git_repo)
+        except Exception as e:
+            logger.warning(f"Git operation failed for {repo_path}: {e}")
+            raise
+        finally:
+            # GitRepository uses subprocess.communicate() which properly cleans up,
+            # but we ensure no lingering references
+            git_repo = None
+
+    async def _get_head_commit_date(self, repo_path: str) -> Optional[datetime]:
+        """Get the date of the HEAD commit in the repository."""
+
+        async def get_date(git_repo):
             output = await git_repo._run_git_command(["log", "-1", "--format=%at", "HEAD"])
             if output.strip():
                 timestamp = int(output.strip())
                 return datetime.fromtimestamp(timestamp)
             return None
+
+        try:
+            return await self._with_git_repo(repo_path, get_date)
         except Exception as e:
             logger.warning(f"Could not get HEAD commit date for {repo_path}: {e}")
             return None
@@ -199,12 +216,14 @@ class LiteSearchEngine:
                 return result
 
             # Count commits between latest indexed and HEAD
-            git_repo = GitRepository(repo_path)
-            since_date_iso = latest_indexed_date.isoformat()
-            output = await git_repo._run_git_command(
-                ["rev-list", "--count", f"--since={since_date_iso}", "HEAD"]
-            )
-            commit_gap = int(output.strip()) if output.strip() else 0
+            async def count_commits(git_repo):
+                since_date_iso = latest_indexed_date.isoformat()
+                output = await git_repo._run_git_command(
+                    ["rev-list", "--count", f"--since={since_date_iso}", "HEAD"]
+                )
+                return int(output.strip()) if output.strip() else 0
+
+            commit_gap = await self._with_git_repo(repo_path, count_commits)
 
             result = (commit_gap > 0, commit_gap)
             self._staleness_cache[cache_key] = (result, now)
@@ -225,9 +244,11 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            git_repo = GitRepository(repository.canonical_path)
-            latest_date = await self.db.get_latest_commit_date(repository_id)
-            commits = await git_repo.get_commits_since(latest_date)
+            async def get_commits(git_repo):
+                latest_date = await self.db.get_latest_commit_date(repository_id)
+                return await git_repo.get_commits_since(latest_date)
+
+            commits = await self._with_git_repo(repository.canonical_path, get_commits)
 
             if not commits:
                 await self.db.update_repository_status(
@@ -376,9 +397,11 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            git_repo = GitRepository(repository.canonical_path)
-            latest_date = await self.db.get_latest_commit_date(repository_id)
-            commits = await git_repo.get_commits_since(latest_date)
+            async def get_commits(git_repo):
+                latest_date = await self.db.get_latest_commit_date(repository_id)
+                return await git_repo.get_commits_since(latest_date)
+
+            commits = await self._with_git_repo(repository.canonical_path, get_commits)
 
             if not commits:
                 await self.db.update_repository_status(
@@ -504,25 +527,27 @@ class LiteSearchEngine:
         )
 
         # Get commit details from Git
-        git_repo = GitRepository(repository.canonical_path)
-        results = []
+        async def get_all_commit_details(git_repo):
+            results = []
+            for result in search_results:
+                try:
+                    commit_info = await git_repo.get_commit_info(result.sha)
+                    results.append(
+                        {
+                            "sha": result.sha,
+                            "similarity_score": result.similarity_score,
+                            "message": commit_info.get("message", ""),
+                            "author": commit_info.get("author", ""),
+                            "date": commit_info.get("date", ""),
+                            "files_changed": commit_info.get("files_changed", []),
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not get details for commit {result.sha}: {e}")
+                    continue
+            return results
 
-        for result in search_results:
-            try:
-                commit_info = await git_repo.get_commit_info(result.sha)
-                results.append(
-                    {
-                        "sha": result.sha,
-                        "similarity_score": result.similarity_score,
-                        "message": commit_info.get("message", ""),
-                        "author": commit_info.get("author", ""),
-                        "date": commit_info.get("date", ""),
-                        "files_changed": commit_info.get("files_changed", []),
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Could not get details for commit {result.sha}: {e}")
-                continue
+        results = await self._with_git_repo(repository.canonical_path, get_all_commit_details)
 
         # Include background indexing warning if applicable
         if update_info and update_info.get("warning_message"):
@@ -539,9 +564,12 @@ class LiteSearchEngine:
 
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
-        try:
-            git_repo = GitRepository(repository_path)
+
+        async def get_count(git_repo):
             return await git_repo.get_commit_count()
+
+        try:
+            return await self._with_git_repo(repository_path, get_count)
         except Exception:
             return 0
 
