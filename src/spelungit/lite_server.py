@@ -10,7 +10,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from pydantic import AnyUrl
@@ -123,6 +123,14 @@ class LiteSearchEngine:
     def __init__(self, db_manager: SQLiteDatabaseManager, embedding_manager: LiteEmbeddingManager):
         self.db = db_manager
         self.embeddings = embedding_manager
+        # Cache for staleness checks to avoid repeated git calls
+        self._staleness_cache = {}
+        # Track active background indexing tasks to prevent race conditions
+        self._background_tasks = {}
+        # Configuration for auto-updates
+        self.background_threshold = 50  # Commits threshold for background vs foreground indexing
+        self.staleness_check_cache_minutes = 5  # Cache validity in minutes
+        self.enable_auto_update = True  # Global enable/disable flag
 
     async def _detect_repository_context(self, repository_path: Optional[str] = None) -> tuple:
         """Detect which repository to search based on context."""
@@ -140,6 +148,301 @@ class LiteSearchEngine:
         repository = await self.db.get_or_create_repository(repository_id, canonical_path)
 
         return repository_id, repository
+
+    async def _get_head_commit_date(self, repo_path: str) -> Optional[datetime]:
+        """Get the date of the HEAD commit in the repository."""
+        try:
+            git_repo = GitRepository(repo_path)
+            output = await git_repo._run_git_command(["log", "-1", "--format=%at", "HEAD"])
+            if output.strip():
+                timestamp = int(output.strip())
+                return datetime.fromtimestamp(timestamp)
+            return None
+        except Exception as e:
+            logger.warning(f"Could not get HEAD commit date for {repo_path}: {e}")
+            return None
+
+    async def _is_index_stale(self, repository_id: str, repo_path: str) -> Tuple[bool, int]:
+        """Check if the index is stale and return commit gap count."""
+        cache_key = repository_id
+        now = datetime.now()
+
+        # Check cache first
+        if cache_key in self._staleness_cache:
+            cached_data, cache_time = self._staleness_cache[cache_key]
+            cache_age_minutes = (now - cache_time).total_seconds() / 60
+            if cache_age_minutes < self.staleness_check_cache_minutes:
+                return cached_data
+
+        try:
+            # Get latest indexed commit date
+            latest_indexed_date = await self.db.get_latest_commit_date(repository_id)
+            if not latest_indexed_date:
+                # No commits indexed yet
+                result = (True, -1)  # -1 indicates full index needed
+                self._staleness_cache[cache_key] = (result, now)
+                return result
+
+            # Get HEAD commit date
+            head_commit_date = await self._get_head_commit_date(repo_path)
+            if not head_commit_date:
+                # Can't determine HEAD, assume not stale
+                result = (False, 0)
+                self._staleness_cache[cache_key] = (result, now)
+                return result
+
+            # Check if HEAD is newer than latest indexed
+            if head_commit_date <= latest_indexed_date:
+                # Index is up to date
+                result = (False, 0)
+                self._staleness_cache[cache_key] = (result, now)
+                return result
+
+            # Count commits between latest indexed and HEAD
+            git_repo = GitRepository(repo_path)
+            since_date_iso = latest_indexed_date.isoformat()
+            output = await git_repo._run_git_command(
+                ["rev-list", "--count", f"--since={since_date_iso}", "HEAD"]
+            )
+            commit_gap = int(output.strip()) if output.strip() else 0
+
+            result = (commit_gap > 0, commit_gap)
+            self._staleness_cache[cache_key] = (result, now)
+            return result
+
+        except Exception as e:
+            logger.warning(f"Error checking index staleness for {repository_id}: {e}")
+            # On error, assume not stale to avoid disruption
+            result = (False, 0)
+            self._staleness_cache[cache_key] = (result, now)
+            return result
+
+    async def _start_background_indexing(self, repository_id: str, repository) -> None:
+        """Start background indexing for large commit gaps."""
+        try:
+            logger.info(f"Starting background indexing for {repository_id}")
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXING, progress=0
+            )
+
+            git_repo = GitRepository(repository.canonical_path)
+            latest_date = await self.db.get_latest_commit_date(repository_id)
+            commits = await git_repo.get_commits_since(latest_date)
+
+            if not commits:
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=await self.db.get_commit_count(repository_id),
+                )
+                return
+
+            total_commits = len(commits)
+            batch_size = 20  # Smaller batches for background processing
+
+            # Process commits in batches
+            for i in range(0, total_commits, batch_size):
+                batch = commits[i : i + batch_size]
+
+                for commit_data in batch:
+                    if await self.db.commit_exists(repository_id, commit_data["sha"]):
+                        continue
+
+                    content = self.embeddings.format_commit_for_embedding(
+                        message=commit_data["message"],
+                        diff=commit_data.get("diff", ""),
+                        files_changed=commit_data.get("files_changed", []),
+                    )
+
+                    embedding = await self.embeddings.generate_embedding(
+                        content, files_changed=commit_data.get("files_changed", [])
+                    )
+
+                    from spelungit.models import StoredCommit
+
+                    stored_commit = StoredCommit(
+                        repository_id=repository_id,
+                        sha=commit_data["sha"],
+                        embedding=embedding,
+                        commit_date=commit_data["date"],
+                        created_at=datetime.now(),
+                    )
+
+                    authors = commit_data.get("authors", [commit_data.get("author", "")])
+                    await self.db.store_commit(
+                        stored_commit,
+                        authors,
+                        message=commit_data.get("message", ""),
+                        diff_content=commit_data.get("diff", ""),
+                    )
+
+                # Update progress
+                processed = min(i + batch_size, total_commits)
+                progress = int((processed / total_commits) * 100)
+                await self.db.update_repository_status(
+                    repository_id, RepositoryStatus.INDEXING, progress=progress
+                )
+
+                # Small delay to avoid overwhelming the system
+                await asyncio.sleep(0.1)
+
+            # Mark as completed
+            total_count = await self.db.get_commit_count(repository_id)
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXED, commit_count=total_count
+            )
+
+            # Clear cache for this repository
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            logger.info(
+                f"✅ Background indexing completed for {repository_id}: {len(commits)} commits"
+            )
+
+        except Exception as e:
+            logger.error(f"Background indexing failed for {repository_id}: {e}")
+            await self.db.update_repository_status(
+                repository_id,
+                RepositoryStatus.INDEXED,  # Revert to previous status
+            )
+        finally:
+            # Clean up the task reference
+            if repository_id in self._background_tasks:
+                del self._background_tasks[repository_id]
+
+    async def _check_and_update_if_stale(self, repository_id: str, repository) -> Dict[str, Any]:
+        """Check if index is stale and update appropriately.
+
+        Returns:
+            Dict with keys:
+            - updated: bool - whether any update was performed
+            - background: bool - whether update is running in background
+            - commit_gap: int - number of commits found
+            - warning_message: str - message for user if background indexing started
+        """
+        result = {"updated": False, "background": False, "commit_gap": 0, "warning_message": ""}
+
+        if not self.enable_auto_update:
+            return result
+
+        is_stale, commit_gap = await self._is_index_stale(repository_id, repository.canonical_path)
+        result["commit_gap"] = commit_gap
+
+        if not is_stale:
+            return result
+
+        if commit_gap == -1:
+            # No commits indexed yet - this should be handled by existing flow
+            return result
+
+        if commit_gap >= self.background_threshold:
+            # Check if background task is already running for this repository
+            if repository_id in self._background_tasks:
+                task = self._background_tasks[repository_id]
+                if not task.done():
+                    # Task already running, return info about it
+                    result["background"] = True
+                    result["warning_message"] = (
+                        f"Background indexing already in progress for {commit_gap} new commits. "
+                        f"Search results may not include the latest commits until indexing completes."
+                    )
+                    return result
+                else:
+                    # Task completed, clean it up
+                    del self._background_tasks[repository_id]
+
+            # Start background indexing for large gaps
+            logger.info(
+                f"Starting background indexing for {commit_gap} new commits (≥{self.background_threshold})"
+            )
+
+            # Start background task (fire and forget) and track it
+            task = asyncio.create_task(self._start_background_indexing(repository_id, repository))
+            self._background_tasks[repository_id] = task
+
+            result["background"] = True
+            result["warning_message"] = (
+                f"Found {commit_gap} new commits. Indexing in background - "
+                f"search results may not include the latest commits until indexing completes."
+            )
+            return result
+
+        # Foreground indexing for smaller gaps
+        logger.info(f"Auto-updating index with {commit_gap} new commits...")
+
+        try:
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXING, progress=0
+            )
+
+            git_repo = GitRepository(repository.canonical_path)
+            latest_date = await self.db.get_latest_commit_date(repository_id)
+            commits = await git_repo.get_commits_since(latest_date)
+
+            if not commits:
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=await self.db.get_commit_count(repository_id),
+                )
+                result["updated"] = True
+                return result
+
+            # Process new commits
+            for commit_data in commits:
+                if await self.db.commit_exists(repository_id, commit_data["sha"]):
+                    continue
+
+                content = self.embeddings.format_commit_for_embedding(
+                    message=commit_data["message"],
+                    diff=commit_data.get("diff", ""),
+                    files_changed=commit_data.get("files_changed", []),
+                )
+
+                embedding = await self.embeddings.generate_embedding(
+                    content, files_changed=commit_data.get("files_changed", [])
+                )
+
+                from spelungit.models import StoredCommit
+
+                stored_commit = StoredCommit(
+                    repository_id=repository_id,
+                    sha=commit_data["sha"],
+                    embedding=embedding,
+                    commit_date=commit_data["date"],
+                    created_at=datetime.now(),
+                )
+
+                authors = commit_data.get("authors", [commit_data.get("author", "")])
+                await self.db.store_commit(
+                    stored_commit,
+                    authors,
+                    message=commit_data.get("message", ""),
+                    diff_content=commit_data.get("diff", ""),
+                )
+
+            # Mark as completed
+            total_count = await self.db.get_commit_count(repository_id)
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXED, commit_count=total_count
+            )
+
+            # Clear cache for this repository
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            logger.info(f"✅ Auto-updated index with {len(commits)} new commits")
+            result["updated"] = True
+            return result
+
+        except Exception as e:
+            logger.error(f"Auto-update failed for {repository_id}: {e}")
+            await self.db.update_repository_status(
+                repository_id,
+                RepositoryStatus.INDEXED,  # Revert to previous status
+            )
+            return result
 
     async def search_commits(
         self,
@@ -174,6 +477,20 @@ class LiteSearchEngine:
                 f"Use the 'index_repository' tool to retry."
             )
 
+        # Check if index is stale and auto-update if possible
+        update_info = None
+        if repository.status == RepositoryStatus.INDEXED:
+            try:
+                update_info = await self._check_and_update_if_stale(repository_id, repository)
+                if update_info["updated"]:
+                    # Refresh repository info after foreground update
+                    repository = await self.db.get_or_create_repository(
+                        repository_id, repository.canonical_path
+                    )
+            except Exception as e:
+                # Log warning but don't fail the search
+                logger.warning(f"Auto-update check failed for {repository_id}: {e}")
+
         # Generate query embedding
         query_embedding = await self.embeddings.generate_embedding(query)
 
@@ -206,6 +523,17 @@ class LiteSearchEngine:
             except Exception as e:
                 logger.warning(f"Could not get details for commit {result.sha}: {e}")
                 continue
+
+        # Include background indexing warning if applicable
+        if update_info and update_info.get("warning_message"):
+            # Add warning message to results metadata (will be handled by tool call handler)
+            results.append(
+                {
+                    "_warning": update_info["warning_message"],
+                    "_background_indexing": True,
+                    "_commit_gap": update_info.get("commit_gap", 0),
+                }
+            )
 
         return results
 
@@ -280,7 +608,7 @@ class LiteSearchEngine:
                         sha=commit_data["sha"],
                         embedding=embedding,
                         commit_date=commit_data["date"],
-                        created_at=datetime.utcnow(),
+                        created_at=datetime.now(),
                     )
 
                     authors = commit_data.get("authors", [commit_data.get("author", "")])
@@ -454,6 +782,36 @@ async def list_tools() -> List[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="configure_auto_update",
+            description="Configure automatic index update behavior",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enable_auto_update": {
+                        "type": "boolean",
+                        "description": "Enable or disable automatic index updates",
+                    },
+                    "background_threshold": {
+                        "type": "integer",
+                        "description": "Threshold for background vs foreground indexing (default: 50)",
+                        "minimum": 5,
+                        "maximum": 500,
+                    },
+                    "staleness_check_cache_minutes": {
+                        "type": "integer",
+                        "description": "Cache validity for staleness checks in minutes (default: 5)",
+                        "minimum": 1,
+                        "maximum": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_auto_update_config",
+            description="Get current automatic index update configuration",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -487,12 +845,24 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                     author_filter=author_filter,
                 )
 
-                if not results:
-                    return [TextContent(type="text", text="No matching commits found.")]
+                # Check for warning messages (background indexing)
+                warning_message = ""
+                actual_results = []
+                for result in results:
+                    if isinstance(result, dict) and "_warning" in result:
+                        warning_message = result["_warning"]
+                    else:
+                        actual_results.append(result)
+
+                if not actual_results:
+                    message = "No matching commits found."
+                    if warning_message:
+                        message += f"\n\n⚠️  {warning_message}"
+                    return [TextContent(type="text", text=message)]
 
                 # Format results
                 formatted_results = []
-                for result in results:
+                for result in actual_results:
                     formatted_results.append(
                         f"**Commit:** {result['sha'][:8]}\n"
                         f"**Similarity:** {result['similarity_score']:.3f}\n"
@@ -507,13 +877,16 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                         )
                     )
 
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Found {len(results)} matching commits:\n\n"
-                        + "\n\n---\n\n".join(formatted_results),
-                    )
-                ]
+                response_text = (
+                    f"Found {len(actual_results)} matching commits:\n\n"
+                    + "\n\n---\n\n".join(formatted_results)
+                )
+
+                # Add warning message if background indexing is happening
+                if warning_message:
+                    response_text += f"\n\n⚠️  {warning_message}"
+
+                return [TextContent(type="text", text=response_text)]
 
             except (RepositoryNotIndexedException, RepositoryIndexingException) as e:
                 return [TextContent(type="text", text=str(e))]
@@ -556,6 +929,37 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
                 if repository.error_message:
                     status_text += f"\n**Error:** {repository.error_message}"
+
+                # Add auto-update information
+                if repository.status == RepositoryStatus.INDEXED:
+                    try:
+                        is_stale, commit_gap = await search_engine._is_index_stale(
+                            repository_id, repository.canonical_path
+                        )
+                        if is_stale and commit_gap > 0:
+                            status_text += (
+                                f"\n**Index Status:** Stale ({commit_gap} new commits available)"
+                            )
+                            if commit_gap < search_engine.background_threshold:
+                                status_text += (
+                                    "\n**Auto-update:** Will update immediately on next search"
+                                )
+                            else:
+                                status_text += (
+                                    "\n**Auto-update:** Will update in background on next search"
+                                )
+                        else:
+                            status_text += "\n**Index Status:** Up to date"
+                    except Exception as e:
+                        logger.warning(f"Could not check staleness for status: {e}")
+
+                # Add auto-update configuration info
+                status_text += (
+                    f"\n\n**Auto-update Config:**\n"
+                    f"• Enabled: {'Yes' if search_engine.enable_auto_update else 'No'}\n"
+                    f"• Background Threshold: {search_engine.background_threshold} commits\n"
+                    f"• Cache: {search_engine.staleness_check_cache_minutes} min"
+                )
 
                 return [TextContent(type="text", text=status_text)]
 
@@ -726,6 +1130,65 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             except Exception as e:
                 logger.error(f"Error in who_wrote: {e}")
                 return [TextContent(type="text", text=f"Error finding authors: {str(e)}")]
+
+        elif name == "configure_auto_update":
+            enable_auto_update = arguments.get("enable_auto_update")
+            background_threshold = arguments.get("background_threshold")
+            staleness_check_cache_minutes = arguments.get("staleness_check_cache_minutes")
+
+            try:
+                # Update configuration in the search engine
+                config_updated = []
+
+                if enable_auto_update is not None:
+                    search_engine.enable_auto_update = enable_auto_update
+                    config_updated.append(
+                        f"Auto-update: {'enabled' if enable_auto_update else 'disabled'}"
+                    )
+
+                if background_threshold is not None:
+                    search_engine.background_threshold = background_threshold
+                    config_updated.append(f"Background threshold: {background_threshold} commits")
+
+                if staleness_check_cache_minutes is not None:
+                    search_engine.staleness_check_cache_minutes = staleness_check_cache_minutes
+                    config_updated.append(
+                        f"Cache duration: {staleness_check_cache_minutes} minutes"
+                    )
+                    # Clear existing cache since cache duration changed
+                    search_engine._staleness_cache.clear()
+
+                if config_updated:
+                    response_text = "**Auto-update configuration updated:**\n\n" + "\n".join(
+                        f"• {item}" for item in config_updated
+                    )
+                else:
+                    response_text = "No configuration changes specified."
+
+                return [TextContent(type="text", text=response_text)]
+
+            except Exception as e:
+                logger.error(f"Error configuring auto-update: {e}")
+                return [TextContent(type="text", text=f"Error configuring auto-update: {str(e)}")]
+
+        elif name == "get_auto_update_config":
+            try:
+                config_text = (
+                    "**Current Auto-update Configuration:**\n\n"
+                    f"**Enabled:** {'Yes' if search_engine.enable_auto_update else 'No'}\n"
+                    f"**Background Threshold:** {search_engine.background_threshold} commits\n"
+                    f"**Cache Duration:** {search_engine.staleness_check_cache_minutes} minutes\n\n"
+                    f"**Behavior:**\n"
+                    f"• < {search_engine.background_threshold} commits: Immediate foreground indexing\n"
+                    f"• ≥ {search_engine.background_threshold} commits: Background indexing with warning\n\n"
+                    f"**Cache Status:** {len(search_engine._staleness_cache)} repositories cached"
+                )
+
+                return [TextContent(type="text", text=config_text)]
+
+            except Exception as e:
+                logger.error(f"Error getting auto-update config: {e}")
+                return [TextContent(type="text", text=f"Error getting configuration: {str(e)}")]
 
         else:
             raise ValueError(f"Unknown tool: {name}")
