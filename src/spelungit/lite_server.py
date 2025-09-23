@@ -334,7 +334,23 @@ class LiteSearchEngine:
                 )
 
                 # Small delay to avoid overwhelming the system
-                await asyncio.sleep(0.1)
+                try:
+                    await asyncio.sleep(0.1)
+                except asyncio.CancelledError:
+                    # Ensure proper cleanup on cancellation
+                    logger.warning(f"Background indexing cancelled for {repository_id}")
+                    # Update status with partial progress
+                    current_count = await self.db.get_commit_count(repository_id)
+                    await self.db.update_repository_status(
+                        repository_id,
+                        RepositoryStatus.INDEXED,
+                        commit_count=current_count,
+                        error_message=f"Indexing was cancelled after {processed} commits",
+                    )
+                    # Clean up progress tracking
+                    if repository_id in self._background_progress:
+                        del self._background_progress[repository_id]
+                    raise  # Re-raise to properly propagate cancellation
 
             # Mark as completed
             total_count = await self.db.get_commit_count(repository_id)
