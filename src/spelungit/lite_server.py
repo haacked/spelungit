@@ -7,6 +7,7 @@ Zero-config deployment without PostgreSQL or OpenAI dependencies.
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -421,6 +422,23 @@ class LiteSearchEngine:
 
     def _is_transient_error(self, error: Exception) -> bool:
         """Determine if an error is likely transient and worth retrying."""
+        # Check specific exception types first (most reliable)
+        if isinstance(error, (asyncio.TimeoutError, ConnectionError, OSError)):
+            return True
+
+        # Check for specific subprocess errors (Git command failures)
+        if isinstance(error, subprocess.CalledProcessError):
+            # Git lock errors, temporary failures
+            if hasattr(error, 'returncode') and error.returncode in [128, 255]:
+                return True
+            # Check stderr for Git-specific transient errors
+            if hasattr(error, 'stderr') and error.stderr:
+                stderr_str = error.stderr.decode().lower() if isinstance(error.stderr, bytes) else str(error.stderr).lower()
+                git_transient_indicators = ['unable to lock', 'resource temporarily unavailable', 'connection timed out']
+                if any(indicator in stderr_str for indicator in git_transient_indicators):
+                    return True
+
+        # Fall back to string matching as last resort
         error_str = str(error).lower()
         transient_indicators = [
             "timeout",
