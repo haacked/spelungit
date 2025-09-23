@@ -429,12 +429,20 @@ class LiteSearchEngine:
         # Check for specific subprocess errors (Git command failures)
         if isinstance(error, subprocess.CalledProcessError):
             # Git lock errors, temporary failures
-            if hasattr(error, 'returncode') and error.returncode in [128, 255]:
+            if hasattr(error, "returncode") and error.returncode in [128, 255]:
                 return True
             # Check stderr for Git-specific transient errors
-            if hasattr(error, 'stderr') and error.stderr:
-                stderr_str = error.stderr.decode().lower() if isinstance(error.stderr, bytes) else str(error.stderr).lower()
-                git_transient_indicators = ['unable to lock', 'resource temporarily unavailable', 'connection timed out']
+            if hasattr(error, "stderr") and error.stderr:
+                stderr_str = (
+                    error.stderr.decode().lower()
+                    if isinstance(error.stderr, bytes)
+                    else str(error.stderr).lower()
+                )
+                git_transient_indicators = [
+                    "unable to lock",
+                    "resource temporarily unavailable",
+                    "connection timed out",
+                ]
                 if any(indicator in stderr_str for indicator in git_transient_indicators):
                     return True
 
