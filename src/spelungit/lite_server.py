@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -487,6 +487,24 @@ class LiteSearchEngine:
 
         return progress_info
 
+    def _cleanup_stale_progress(self) -> None:
+        """Remove stale progress entries older than threshold to prevent memory leaks."""
+        now = datetime.now()
+        stale_threshold = timedelta(hours=1)  # Remove entries older than 1 hour
+
+        stale_keys = [
+            repo_id
+            for repo_id, progress in self._background_progress.items()
+            if now - progress.get("last_updated", now) > stale_threshold
+        ]
+
+        for repo_id in stale_keys:
+            logger.warning(f"Cleaning up stale progress tracking for {repo_id}")
+            del self._background_progress[repo_id]
+
+        if stale_keys:
+            logger.info(f"Cleaned up {len(stale_keys)} stale progress entries")
+
     async def _validate_and_repair_repository_state(self, repository_id: str, repository) -> bool:
         """Validate repository state and attempt to repair inconsistencies."""
         try:
@@ -716,6 +734,9 @@ class LiteSearchEngine:
         # Detect repository context
         repository_id, repository = await self._detect_repository_context(repository_path)
 
+        # Cleanup stale progress entries to prevent memory leaks
+        self._cleanup_stale_progress()
+
         # Validate and repair repository state if needed (with timeout)
         try:
             await asyncio.wait_for(
@@ -835,6 +856,9 @@ class LiteSearchEngine:
 
         # Detect repository context
         repository_id, repository = await self._detect_repository_context(repository_path)
+
+        # Cleanup stale progress entries to prevent memory leaks
+        self._cleanup_stale_progress()
 
         logger.info(f"Starting indexing for repository: {repository_id}")
         await self.db.update_repository_status(repository_id, RepositoryStatus.INDEXING, progress=0)
