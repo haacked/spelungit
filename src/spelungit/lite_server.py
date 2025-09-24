@@ -125,13 +125,13 @@ class LiteSearchEngine:
         self.db = db_manager
         self.embeddings = embedding_manager
         # Cache for staleness checks to avoid repeated git calls
-        self._staleness_cache = {}
+        self._staleness_cache: Dict[str, Tuple[Tuple[bool, int], Any]] = {}
         # Track active background indexing tasks to prevent race conditions
-        self._background_tasks = {}
+        self._background_tasks: Dict[str, asyncio.Task[None]] = {}
         # Lock for atomic task management to prevent race conditions
         self._task_lock = asyncio.Lock()
         # Track progress and metadata for background tasks
-        self._background_progress = {}
+        self._background_progress: Dict[str, Dict[str, Any]] = {}
         # Configuration for auto-updates
         self.background_threshold = 50  # Commits threshold for background vs foreground indexing
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes
@@ -862,7 +862,7 @@ class LiteSearchEngine:
                 }
             )
 
-        return results
+        return results  # type: ignore[no-any-return]
 
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
@@ -871,7 +871,7 @@ class LiteSearchEngine:
             return await git_repo.get_commit_count()
 
         try:
-            return await self._with_git_repo(repository_path, get_count)
+            return await self._with_git_repo(repository_path, get_count)  # type: ignore[no-any-return]
         except Exception:
             return 0
 
