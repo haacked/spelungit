@@ -73,26 +73,24 @@ if ! run_command "$lint_cmd" "Running linters"; then
 	success=false
 fi
 
-# Security checks (commented out due to dependency issues in current environment)
-# if command_exists bandit; then
-# 	if ! run_command "bandit -r src/" "Running security scan"; then
-# 		warning "Security issues found (this may be due to bandit configuration issues)"
-# 		# Don't fail on security warnings in check mode
-# 	fi
-# else
-# 	info "Bandit not available - skipping security scan"
-# fi
+# Security checks
+if command_exists bandit; then
+	if ! run_command "bandit -r src/" "Running security scan"; then
+		warning "Security issues found (may be false positives for git subprocess calls)"
+		# Don't fail on security warnings in check mode - they're mostly false positives
+	fi
+else
+	info "Bandit not available - skipping security scan"
+fi
 
-# if command_exists safety; then
-# 	if ! run_command "safety check" "Checking dependency vulnerabilities"; then
-# 		warning "Dependency vulnerabilities found (this may be due to safety configuration issues)"
-# 		# Don't fail on safety warnings in check mode
-# 	fi
-# else
-# 	info "Safety not available - skipping dependency vulnerability check"
-# fi
-
-info "Security checks temporarily disabled due to dependency issues"
+if command_exists safety; then
+	if ! run_command "safety check --short-report" "Checking dependency vulnerabilities"; then
+		warning "Dependency vulnerabilities found"
+		# Don't fail on safety warnings in check mode - often low-risk issues
+	fi
+else
+	info "Safety not available - skipping dependency vulnerability check"
+fi
 
 # Pre-commit hooks removed - now pre-commit calls this script instead
 # This prevents circular dependency and tool conflicts
