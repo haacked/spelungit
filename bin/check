@@ -73,20 +73,41 @@ if ! run_command "$lint_cmd" "Running linters"; then
 	success=false
 fi
 
-# Security checks
+# Security checks - don't fail the build but report issues
 if command_exists bandit; then
-	if ! run_command "bandit -r src/" "Running security scan"; then
+	print_color blue "Running security scan"
+	if bandit -r src/ >/dev/null 2>&1; then
+		print_color green "✓ Running security scan"
+	else
+		print_color yellow "⚠ Running security scan found issues"
+		echo "Security scan details (showing summary):"
+		bandit -r src/ --format json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(f'  Found {len(data.get(\"results\", []))} security issues:')
+    for result in data.get('results', [])[:5]:  # Show first 5 issues
+        print(f'    - {result[\"issue_text\"]} (Line {result[\"line_number\"]})')
+    if len(data.get('results', [])) > 5:
+        print(f'    ... and {len(data.get(\"results\", [])) - 5} more issues')
+except:
+    print('  Run: bandit -r src/ for details')
+"
 		warning "Security issues found (may be false positives for git subprocess calls)"
-		# Don't fail on security warnings in check mode - they're mostly false positives
 	fi
 else
 	info "Bandit not available - skipping security scan"
 fi
 
 if command_exists safety; then
-	if ! run_command "safety check --short-report" "Checking dependency vulnerabilities"; then
-		warning "Dependency vulnerabilities found"
-		# Don't fail on safety warnings in check mode - often low-risk issues
+	print_color blue "Checking dependency vulnerabilities"
+	if safety check --short-report >/dev/null 2>&1; then
+		print_color green "✓ Checking dependency vulnerabilities"
+	else
+		print_color yellow "⚠ Checking dependency vulnerabilities found issues"
+		echo "Vulnerability scan details:"
+		safety check --short-report 2>&1 | grep -E "(vulnerability|Vulnerability|ADVISORY)" | head -10 | sed 's/^/  /'
+		warning "Dependency vulnerabilities found (often low-risk issues)"
 	fi
 else
 	info "Safety not available - skipping dependency vulnerability check"

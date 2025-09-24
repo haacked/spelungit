@@ -78,22 +78,43 @@ run_command() {
 		fi
 	fi
 
+	# Create temporary files for capturing output
+	local stdout_file
+	local stderr_file
+	stdout_file=$(mktemp)
+	stderr_file=$(mktemp)
+
 	if [ "$verbose" = "1" ]; then
-		eval "$cmd"
+		# In verbose mode, show output in real-time and also capture it
+		eval "$cmd" 2>&1 | tee "$stdout_file"
+		local exit_code=${PIPESTATUS[0]}
 	else
-		eval "$cmd" >/dev/null 2>&1
+		# Capture output for potential error reporting
+		eval "$cmd" >"$stdout_file" 2>"$stderr_file"
+		local exit_code=$?
 	fi
 
-	local exit_code=$?
 	if [ $exit_code -eq 0 ]; then
 		if [ -n "$desc" ]; then
 			print_color green "✓ $desc"
 		fi
+		# Clean up temp files
+		rm -f "$stdout_file" "$stderr_file"
 		return 0
 	else
 		if [ -n "$desc" ]; then
 			print_color red "✗ $desc failed"
+			# Show error details when command fails
+			if [ -s "$stderr_file" ]; then
+				echo "Error output:"
+				cat "$stderr_file" | head -20 | sed 's/^/  /'
+			elif [ -s "$stdout_file" ]; then
+				echo "Output (last 20 lines):"
+				tail -20 "$stdout_file" | sed 's/^/  /'
+			fi
 		fi
+		# Clean up temp files
+		rm -f "$stdout_file" "$stderr_file"
 		return 1
 	fi
 }
