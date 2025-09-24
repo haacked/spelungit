@@ -756,6 +756,24 @@ class SQLiteDatabaseManager:
         result = cursor.fetchone()[0]
         return datetime.fromisoformat(result) if result else None
 
+    async def get_latest_commit_sha(self, repository_id: str) -> Optional[str]:
+        """Get the SHA of the latest indexed commit for a repository."""
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized")
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT sha FROM git_commits
+            WHERE repository_id = ?
+            ORDER BY commit_date DESC
+            LIMIT 1
+        """,
+            (repository_id,),
+        )
+
+        result = cursor.fetchone()
+        return result[0] if result else None
+
     async def get_commits_needing_indexing(
         self, repository_id: str, limit: int = 1000
     ) -> List[str]:

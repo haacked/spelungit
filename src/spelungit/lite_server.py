@@ -7,10 +7,11 @@ Zero-config deployment without PostgreSQL or OpenAI dependencies.
 import asyncio
 import logging
 import os
+import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from pydantic import AnyUrl
@@ -123,6 +124,18 @@ class LiteSearchEngine:
     def __init__(self, db_manager: SQLiteDatabaseManager, embedding_manager: LiteEmbeddingManager):
         self.db = db_manager
         self.embeddings = embedding_manager
+        # Cache for staleness checks to avoid repeated git calls
+        self._staleness_cache = {}
+        # Track active background indexing tasks to prevent race conditions
+        self._background_tasks = {}
+        # Lock for atomic task management to prevent race conditions
+        self._task_lock = asyncio.Lock()
+        # Track progress and metadata for background tasks
+        self._background_progress = {}
+        # Configuration for auto-updates
+        self.background_threshold = 50  # Commits threshold for background vs foreground indexing
+        self.staleness_check_cache_minutes = 5  # Cache validity in minutes
+        self.enable_auto_update = True  # Global enable/disable flag
 
     async def _detect_repository_context(self, repository_path: Optional[str] = None) -> tuple:
         """Detect which repository to search based on context."""
@@ -141,6 +154,600 @@ class LiteSearchEngine:
 
         return repository_id, repository
 
+    async def _with_git_repo(self, repo_path: str, operation):
+        """Execute an operation with a GitRepository instance, ensuring proper resource management."""
+        git_repo = None
+        try:
+            git_repo = GitRepository(repo_path)
+            return await operation(git_repo)
+        except Exception as e:
+            logger.warning(f"Git operation failed for {repo_path}: {e}")
+            raise
+        finally:
+            # GitRepository uses subprocess.communicate() which properly cleans up,
+            # but we ensure no lingering references
+            git_repo = None
+
+    async def _is_index_stale(self, repository_id: str, repo_path: str) -> Tuple[bool, int]:
+        """Check if the index is stale and return commit gap count."""
+        cache_key = repository_id
+        now = datetime.now()
+
+        # Check cache first
+        if cache_key in self._staleness_cache:
+            cached_data, cache_time = self._staleness_cache[cache_key]
+            cache_age_minutes = (now - cache_time).total_seconds() / 60
+            if cache_age_minutes < self.staleness_check_cache_minutes:
+                return cached_data
+
+        try:
+            # Get latest indexed commit SHA
+            latest_indexed_sha = await self.db.get_latest_commit_sha(repository_id)
+            if not latest_indexed_sha:
+                # No commits indexed yet
+                result = (True, -1)  # -1 indicates full index needed
+                self._staleness_cache[cache_key] = (result, now)
+                return result
+
+            # Count commits between latest indexed SHA and HEAD
+            async def count_commits(git_repo):
+                try:
+                    # Use SHA-based range: count commits from latest_sha..HEAD
+                    output = await git_repo._run_git_command(
+                        ["rev-list", "--count", f"{latest_indexed_sha}..HEAD"]
+                    )
+                    return int(output.strip()) if output.strip() else 0
+                except Exception as e:
+                    logger.warning(f"Failed to count commits using SHA range: {e}")
+                    # Fallback: just check if HEAD exists and is different
+                    try:
+                        head_sha = await git_repo._run_git_command(["rev-parse", "HEAD"])
+                        head_sha = head_sha.strip()
+                        if head_sha == latest_indexed_sha:
+                            return 0
+                        else:
+                            # We know there's at least one new commit, but can't count exactly
+                            return 1
+                    except Exception:
+                        return 0
+
+            commit_gap = await self._with_git_repo(repo_path, count_commits)
+
+            result = (commit_gap > 0, commit_gap)
+            self._staleness_cache[cache_key] = (result, now)
+            return result
+
+        except Exception as e:
+            logger.warning(f"Error checking index staleness for {repository_id}: {e}")
+            # On error, assume not stale to avoid disruption
+            result = (False, 0)
+            self._staleness_cache[cache_key] = (result, now)
+            return result
+
+    async def _start_background_indexing(self, repository_id: str, repository) -> None:
+        """Start background indexing for large commit gaps."""
+        try:
+            logger.info(f"Starting background indexing for {repository_id}")
+
+            # Initialize progress tracking
+            self._background_progress[repository_id] = {
+                "started_at": datetime.now(),
+                "phase": "initializing",
+                "commits_processed": 0,
+                "total_commits": 0,
+                "current_batch": 0,
+                "total_batches": 0,
+                "last_updated": datetime.now(),
+            }
+
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXING, progress=0
+            )
+
+            async def get_commits(git_repo):
+                latest_date = await self.db.get_latest_commit_date(repository_id)
+                return await git_repo.get_commits_since(latest_date)
+
+            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+
+            if not commits:
+                # Update progress tracking for empty commit set
+                self._background_progress[repository_id].update(
+                    {"phase": "completed", "last_updated": datetime.now()}
+                )
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=await self.db.get_commit_count(repository_id),
+                )
+                # Clean up progress tracking
+                if repository_id in self._background_progress:
+                    del self._background_progress[repository_id]
+                return
+
+            total_commits = len(commits)
+            batch_size = 20  # Smaller batches for background processing
+            total_batches = (total_commits + batch_size - 1) // batch_size
+
+            # Update progress tracking with commit details
+            self._background_progress[repository_id].update(
+                {
+                    "phase": "processing",
+                    "total_commits": total_commits,
+                    "total_batches": total_batches,
+                    "last_updated": datetime.now(),
+                }
+            )
+
+            # Process commits in batches
+            for i in range(0, total_commits, batch_size):
+                batch = commits[i : i + batch_size]
+
+                for commit_data in batch:
+                    if await self.db.commit_exists(repository_id, commit_data["sha"]):
+                        continue
+
+                    content = self.embeddings.format_commit_for_embedding(
+                        message=commit_data["message"],
+                        diff=commit_data.get("diff", ""),
+                        files_changed=commit_data.get("files_changed", []),
+                    )
+
+                    embedding = await self.embeddings.generate_embedding(
+                        content, files_changed=commit_data.get("files_changed", [])
+                    )
+
+                    from spelungit.models import StoredCommit
+
+                    stored_commit = StoredCommit(
+                        repository_id=repository_id,
+                        sha=commit_data["sha"],
+                        embedding=embedding,
+                        commit_date=commit_data["date"],
+                        created_at=datetime.now(),
+                    )
+
+                    authors = commit_data.get("authors", [commit_data.get("author", "")])
+                    await self.db.store_commit(
+                        stored_commit,
+                        authors,
+                        message=commit_data.get("message", ""),
+                        diff_content=commit_data.get("diff", ""),
+                    )
+
+                # Update progress
+                processed = min(i + batch_size, total_commits)
+                progress = int((processed / total_commits) * 100)
+                current_batch = (i // batch_size) + 1
+
+                # Update detailed progress tracking
+                self._background_progress[repository_id].update(
+                    {
+                        "commits_processed": processed,
+                        "current_batch": current_batch,
+                        "progress_percent": progress,
+                        "last_updated": datetime.now(),
+                    }
+                )
+
+                await self.db.update_repository_status(
+                    repository_id, RepositoryStatus.INDEXING, progress=progress
+                )
+
+                # Small delay to avoid overwhelming the system
+                try:
+                    await asyncio.sleep(0.1)
+                except asyncio.CancelledError:
+                    # Ensure proper cleanup on cancellation
+                    logger.warning(f"Background indexing cancelled for {repository_id}")
+                    # Update status with partial progress
+                    current_count = await self.db.get_commit_count(repository_id)
+                    await self.db.update_repository_status(
+                        repository_id,
+                        RepositoryStatus.INDEXED,
+                        commit_count=current_count,
+                        error_message=f"Indexing was cancelled after {processed} commits",
+                    )
+                    # Clean up progress tracking
+                    if repository_id in self._background_progress:
+                        del self._background_progress[repository_id]
+                    raise  # Re-raise to properly propagate cancellation
+
+            # Mark as completed
+            total_count = await self.db.get_commit_count(repository_id)
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXED, commit_count=total_count
+            )
+
+            # Clear cache for this repository
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            # Mark progress as completed and calculate duration
+            if repository_id in self._background_progress:
+                progress_info = self._background_progress[repository_id]
+                duration = datetime.now() - progress_info["started_at"]
+                logger.info(
+                    f"✅ Background indexing completed for {repository_id}: "
+                    f"{len(commits)} commits in {duration.total_seconds():.1f}s"
+                )
+                # Clean up progress tracking
+                del self._background_progress[repository_id]
+            else:
+                logger.info(
+                    f"✅ Background indexing completed for {repository_id}: {len(commits)} commits"
+                )
+
+        except Exception as e:
+            logger.error(f"Background indexing failed for {repository_id}: {e}")
+
+            # Determine if we should preserve partial progress or revert completely
+            commits_processed = 0
+            if repository_id in self._background_progress:
+                commits_processed = self._background_progress[repository_id].get(
+                    "commits_processed", 0
+                )
+
+            # Preserve partial progress if some commits were successfully indexed
+            if commits_processed > 0:
+                logger.info(f"Preserving partial progress: {commits_processed} commits indexed")
+                # Update repository status with current count and error message
+                total_count = await self.db.get_commit_count(repository_id)
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=total_count,
+                    error_message=f"Partial indexing completed: {commits_processed} commits. Error: {str(e)[:200]}",
+                )
+            else:
+                # No progress made, revert to previous state
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,  # Revert to previous status
+                    error_message=f"Background indexing failed: {str(e)[:200]}",
+                )
+
+            # Clear staleness cache to force re-evaluation
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            # Clean up progress tracking on error
+            if repository_id in self._background_progress:
+                del self._background_progress[repository_id]
+        finally:
+            # Clean up the task reference with lock protection
+            async with self._task_lock:
+                if repository_id in self._background_tasks:
+                    del self._background_tasks[repository_id]
+
+    def _is_transient_error(self, error: Exception) -> bool:
+        """Determine if an error is likely transient and worth retrying."""
+        # Check specific exception types first (most reliable)
+        if isinstance(error, (asyncio.TimeoutError, ConnectionError, OSError)):
+            return True
+
+        # Check for specific subprocess errors (Git command failures)
+        if isinstance(error, subprocess.CalledProcessError):
+            # Git lock errors, temporary failures
+            if hasattr(error, "returncode") and error.returncode in [128, 255]:
+                return True
+            # Check stderr for Git-specific transient errors
+            if hasattr(error, "stderr") and error.stderr:
+                stderr_str = (
+                    error.stderr.decode().lower()
+                    if isinstance(error.stderr, bytes)
+                    else str(error.stderr).lower()
+                )
+                git_transient_indicators = [
+                    "unable to lock",
+                    "resource temporarily unavailable",
+                    "connection timed out",
+                ]
+                if any(indicator in stderr_str for indicator in git_transient_indicators):
+                    return True
+
+        # Fall back to string matching as last resort
+        error_str = str(error).lower()
+        transient_indicators = [
+            "timeout",
+            "connection",
+            "network",
+            "temporary",
+            "unavailable",
+            "busy",
+            "locked",
+            "permission denied",
+        ]
+        return any(indicator in error_str for indicator in transient_indicators)
+
+    async def _start_background_indexing_with_retry(
+        self, repository_id: str, repository, max_retries: int = 2, base_delay: float = 2.0
+    ) -> None:
+        """Start background indexing with retry logic for transient failures."""
+        for attempt in range(max_retries + 1):
+            try:
+                await self._start_background_indexing(repository_id, repository)
+                return  # Success, no need to retry
+            except Exception as e:
+                if attempt == max_retries or not self._is_transient_error(e):
+                    # Final attempt or non-transient error, re-raise
+                    raise
+
+                # Wait before retrying with exponential backoff
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"Background indexing attempt {attempt + 1} failed for {repository_id}: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+
+    def get_background_task_progress(self, repository_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed progress information for a background indexing task."""
+        if repository_id not in self._background_progress:
+            return None
+
+        progress_info = self._background_progress[repository_id].copy()
+
+        # Calculate elapsed time
+        elapsed = datetime.now() - progress_info["started_at"]
+        progress_info["elapsed_seconds"] = elapsed.total_seconds()
+
+        # Calculate estimated time remaining (if we have processed some commits)
+        if progress_info["commits_processed"] > 0:
+            commits_per_second = progress_info["commits_processed"] / elapsed.total_seconds()
+            remaining_commits = progress_info["total_commits"] - progress_info["commits_processed"]
+            if commits_per_second > 0:
+                eta_seconds = remaining_commits / commits_per_second
+                progress_info["eta_seconds"] = eta_seconds
+            else:
+                progress_info["eta_seconds"] = None
+        else:
+            progress_info["eta_seconds"] = None
+
+        # Format times for human readability
+        progress_info["elapsed_human"] = f"{elapsed.total_seconds():.1f}s"
+        if progress_info["eta_seconds"]:
+            progress_info["eta_human"] = f"{progress_info['eta_seconds']:.1f}s"
+        else:
+            progress_info["eta_human"] = "unknown"
+
+        return progress_info
+
+    def _cleanup_stale_progress(self) -> None:
+        """Remove stale progress entries older than threshold to prevent memory leaks."""
+        now = datetime.now()
+        stale_threshold = timedelta(hours=1)  # Remove entries older than 1 hour
+
+        stale_keys = [
+            repo_id
+            for repo_id, progress in self._background_progress.items()
+            if now - progress.get("last_updated", now) > stale_threshold
+        ]
+
+        for repo_id in stale_keys:
+            logger.warning(f"Cleaning up stale progress tracking for {repo_id}")
+            del self._background_progress[repo_id]
+
+        if stale_keys:
+            logger.info(f"Cleaned up {len(stale_keys)} stale progress entries")
+
+    async def _validate_and_repair_repository_state(self, repository_id: str, repository) -> bool:
+        """Validate repository state and attempt to repair inconsistencies."""
+        try:
+            # Check if repository status is consistent with database state
+            commit_count = await self.db.get_commit_count(repository_id)
+
+            # If repository shows as INDEXED but has no commits, mark as not indexed
+            if repository.status == RepositoryStatus.INDEXED and commit_count == 0:
+                logger.warning(
+                    f"Repository {repository_id} marked as INDEXED but has no commits. Resetting state."
+                )
+                await self.db.update_repository_status(repository_id, RepositoryStatus.NOT_INDEXED)
+                return False
+
+            # If repository shows as INDEXING but no active background task, reset to appropriate state
+            if (
+                repository.status == RepositoryStatus.INDEXING
+                and repository_id not in self._background_tasks
+            ):
+                logger.warning(
+                    f"Repository {repository_id} marked as INDEXING but no active task. Resetting state."
+                )
+                if commit_count > 0:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.INDEXED, commit_count=commit_count
+                    )
+                else:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.NOT_INDEXED
+                    )
+                return True
+
+            # If repository shows as FAILED, clear error if we can proceed
+            if repository.status == RepositoryStatus.FAILED:
+                logger.info(
+                    f"Repository {repository_id} was in FAILED state. Attempting to recover."
+                )
+                if commit_count > 0:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.INDEXED, commit_count=commit_count
+                    )
+                else:
+                    await self.db.update_repository_status(
+                        repository_id, RepositoryStatus.NOT_INDEXED
+                    )
+                return True
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to validate/repair repository state for {repository_id}: {e}")
+            return False
+
+    async def _check_and_update_if_stale(self, repository_id: str, repository) -> Dict[str, Any]:
+        """Check if index is stale and update appropriately.
+
+        Returns:
+            Dict with keys:
+            - updated: bool - whether any update was performed
+            - background: bool - whether update is running in background
+            - commit_gap: int - number of commits found
+            - warning_message: str - message for user if background indexing started
+        """
+        result = {"updated": False, "background": False, "commit_gap": 0, "warning_message": ""}
+
+        if not self.enable_auto_update:
+            return result
+
+        is_stale, commit_gap = await self._is_index_stale(repository_id, repository.canonical_path)
+        result["commit_gap"] = commit_gap
+
+        if not is_stale:
+            return result
+
+        if commit_gap == -1:
+            # No commits indexed yet - this should be handled by existing flow
+            return result
+
+        if commit_gap >= self.background_threshold:
+            # Use lock to ensure atomic task management and prevent race conditions
+            async with self._task_lock:
+                # Check if background task is already running for this repository
+                if repository_id in self._background_tasks:
+                    task = self._background_tasks[repository_id]
+                    if not task.done():
+                        # Task already running, return info about it
+                        result["background"] = True
+                        result["warning_message"] = (
+                            f"Background indexing already in progress for {commit_gap} new commits. "
+                            f"Search results may not include the latest commits until indexing completes."
+                        )
+                        return result
+                    else:
+                        # Task completed, clean it up and handle any exceptions
+                        try:
+                            await task  # Ensure any exceptions are handled
+                        except Exception as e:
+                            logger.warning(f"Previous background task failed: {e}")
+                        del self._background_tasks[repository_id]
+
+                # Start background indexing for large gaps
+                logger.info(
+                    f"Starting background indexing for {commit_gap} new commits (≥{self.background_threshold})"
+                )
+
+                # Start background task with retry logic (fire and forget) and track it
+                task = asyncio.create_task(
+                    self._start_background_indexing_with_retry(repository_id, repository)
+                )
+                self._background_tasks[repository_id] = task
+
+            result["background"] = True
+
+            # Check if we have progress information for enhanced warning
+            progress_info = self.get_background_task_progress(repository_id)
+            if progress_info and progress_info["commits_processed"] > 0:
+                # Background task is actively running
+                percent = progress_info.get("progress_percent", 0)
+                processed = progress_info["commits_processed"]
+                total = progress_info["total_commits"]
+                eta = progress_info["eta_human"]
+                result["warning_message"] = (
+                    f"Background indexing in progress: {processed}/{total} commits ({percent}%) - "
+                    f"ETA: {eta}. Search results may not include the latest commits."
+                )
+            else:
+                # Just starting background indexing
+                result["warning_message"] = (
+                    f"Found {commit_gap} new commits. Indexing in background - "
+                    f"search results may not include the latest commits until indexing completes."
+                )
+            return result
+
+        # Foreground indexing for smaller gaps
+        logger.info(f"Auto-updating index with {commit_gap} new commits...")
+
+        try:
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXING, progress=0
+            )
+
+            async def get_commits(git_repo):
+                latest_date = await self.db.get_latest_commit_date(repository_id)
+                return await git_repo.get_commits_since(latest_date)
+
+            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+
+            if not commits:
+                await self.db.update_repository_status(
+                    repository_id,
+                    RepositoryStatus.INDEXED,
+                    commit_count=await self.db.get_commit_count(repository_id),
+                )
+                result["updated"] = True
+                return result
+
+            # Process new commits
+            for commit_data in commits:
+                if await self.db.commit_exists(repository_id, commit_data["sha"]):
+                    continue
+
+                content = self.embeddings.format_commit_for_embedding(
+                    message=commit_data["message"],
+                    diff=commit_data.get("diff", ""),
+                    files_changed=commit_data.get("files_changed", []),
+                )
+
+                embedding = await self.embeddings.generate_embedding(
+                    content, files_changed=commit_data.get("files_changed", [])
+                )
+
+                from spelungit.models import StoredCommit
+
+                stored_commit = StoredCommit(
+                    repository_id=repository_id,
+                    sha=commit_data["sha"],
+                    embedding=embedding,
+                    commit_date=commit_data["date"],
+                    created_at=datetime.now(),
+                )
+
+                authors = commit_data.get("authors", [commit_data.get("author", "")])
+                await self.db.store_commit(
+                    stored_commit,
+                    authors,
+                    message=commit_data.get("message", ""),
+                    diff_content=commit_data.get("diff", ""),
+                )
+
+            # Mark as completed
+            total_count = await self.db.get_commit_count(repository_id)
+            await self.db.update_repository_status(
+                repository_id, RepositoryStatus.INDEXED, commit_count=total_count
+            )
+
+            # Clear cache for this repository
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            logger.info(f"✅ Auto-updated index with {len(commits)} new commits")
+            result["updated"] = True
+            return result
+
+        except Exception as e:
+            logger.error(f"Auto-update failed for {repository_id}: {e}")
+
+            # Clear staleness cache to force re-evaluation on next attempt
+            if repository_id in self._staleness_cache:
+                del self._staleness_cache[repository_id]
+
+            # Update repository status with error information
+            await self.db.update_repository_status(
+                repository_id,
+                RepositoryStatus.INDEXED,  # Revert to previous status
+                error_message=f"Auto-update failed: {str(e)[:200]}",
+            )
+            return result
+
     async def search_commits(
         self,
         query: str,
@@ -152,6 +759,27 @@ class LiteSearchEngine:
 
         # Detect repository context
         repository_id, repository = await self._detect_repository_context(repository_path)
+
+        # Cleanup stale progress entries to prevent memory leaks
+        self._cleanup_stale_progress()
+
+        # Validate and repair repository state if needed (with timeout)
+        try:
+            await asyncio.wait_for(
+                self._validate_and_repair_repository_state(repository_id, repository), timeout=5.0
+            )
+            # Refresh repository info after potential state repair
+            repository = await self.db.get_or_create_repository(
+                repository_id, repository.canonical_path
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"State validation timed out for {repository_id}, proceeding with current state"
+            )
+        except Exception as e:
+            logger.warning(
+                f"State validation failed for {repository_id}: {e}, proceeding with current state"
+            )
 
         # Check repository status
         if repository.status == RepositoryStatus.NOT_INDEXED:
@@ -174,6 +802,20 @@ class LiteSearchEngine:
                 f"Use the 'index_repository' tool to retry."
             )
 
+        # Check if index is stale and auto-update if possible
+        update_info = None
+        if repository.status == RepositoryStatus.INDEXED:
+            try:
+                update_info = await self._check_and_update_if_stale(repository_id, repository)
+                if update_info["updated"]:
+                    # Refresh repository info after foreground update
+                    repository = await self.db.get_or_create_repository(
+                        repository_id, repository.canonical_path
+                    )
+            except Exception as e:
+                # Log warning but don't fail the search
+                logger.warning(f"Auto-update check failed for {repository_id}: {e}")
+
         # Generate query embedding
         query_embedding = await self.embeddings.generate_embedding(query)
 
@@ -187,33 +829,49 @@ class LiteSearchEngine:
         )
 
         # Get commit details from Git
-        git_repo = GitRepository(repository.canonical_path)
-        results = []
+        async def get_all_commit_details(git_repo):
+            results = []
+            for result in search_results:
+                try:
+                    commit_info = await git_repo.get_commit_info(result.sha)
+                    results.append(
+                        {
+                            "sha": result.sha,
+                            "similarity_score": result.similarity_score,
+                            "message": commit_info.get("message", ""),
+                            "author": commit_info.get("author", ""),
+                            "date": commit_info.get("date", ""),
+                            "files_changed": commit_info.get("files_changed", []),
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not get details for commit {result.sha}: {e}")
+                    continue
+            return results
 
-        for result in search_results:
-            try:
-                commit_info = await git_repo.get_commit_info(result.sha)
-                results.append(
-                    {
-                        "sha": result.sha,
-                        "similarity_score": result.similarity_score,
-                        "message": commit_info.get("message", ""),
-                        "author": commit_info.get("author", ""),
-                        "date": commit_info.get("date", ""),
-                        "files_changed": commit_info.get("files_changed", []),
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Could not get details for commit {result.sha}: {e}")
-                continue
+        results = await self._with_git_repo(repository.canonical_path, get_all_commit_details)
+
+        # Include background indexing warning if applicable
+        if update_info and update_info.get("warning_message"):
+            # Add warning message to results metadata (will be handled by tool call handler)
+            results.append(
+                {
+                    "_warning": update_info["warning_message"],
+                    "_background_indexing": True,
+                    "_commit_gap": update_info.get("commit_gap", 0),
+                }
+            )
 
         return results
 
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
-        try:
-            git_repo = GitRepository(repository_path)
+
+        async def get_count(git_repo):
             return await git_repo.get_commit_count()
+
+        try:
+            return await self._with_git_repo(repository_path, get_count)
         except Exception:
             return 0
 
@@ -224,6 +882,9 @@ class LiteSearchEngine:
 
         # Detect repository context
         repository_id, repository = await self._detect_repository_context(repository_path)
+
+        # Cleanup stale progress entries to prevent memory leaks
+        self._cleanup_stale_progress()
 
         logger.info(f"Starting indexing for repository: {repository_id}")
         await self.db.update_repository_status(repository_id, RepositoryStatus.INDEXING, progress=0)
@@ -280,7 +941,7 @@ class LiteSearchEngine:
                         sha=commit_data["sha"],
                         embedding=embedding,
                         commit_date=commit_data["date"],
-                        created_at=datetime.utcnow(),
+                        created_at=datetime.now(),
                     )
 
                     authors = commit_data.get("authors", [commit_data.get("author", "")])
@@ -454,6 +1115,36 @@ async def list_tools() -> List[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="configure_auto_update",
+            description="Configure automatic index update behavior",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enable_auto_update": {
+                        "type": "boolean",
+                        "description": "Enable or disable automatic index updates",
+                    },
+                    "background_threshold": {
+                        "type": "integer",
+                        "description": "Threshold for background vs foreground indexing (default: 50)",
+                        "minimum": 5,
+                        "maximum": 500,
+                    },
+                    "staleness_check_cache_minutes": {
+                        "type": "integer",
+                        "description": "Cache validity for staleness checks in minutes (default: 5)",
+                        "minimum": 1,
+                        "maximum": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_auto_update_config",
+            description="Get current automatic index update configuration",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -487,12 +1178,24 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                     author_filter=author_filter,
                 )
 
-                if not results:
-                    return [TextContent(type="text", text="No matching commits found.")]
+                # Check for warning messages (background indexing)
+                warning_message = ""
+                actual_results = []
+                for result in results:
+                    if isinstance(result, dict) and "_warning" in result:
+                        warning_message = result["_warning"]
+                    else:
+                        actual_results.append(result)
+
+                if not actual_results:
+                    message = "No matching commits found."
+                    if warning_message:
+                        message += f"\n\n⚠️  {warning_message}"
+                    return [TextContent(type="text", text=message)]
 
                 # Format results
                 formatted_results = []
-                for result in results:
+                for result in actual_results:
                     formatted_results.append(
                         f"**Commit:** {result['sha'][:8]}\n"
                         f"**Similarity:** {result['similarity_score']:.3f}\n"
@@ -507,13 +1210,16 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                         )
                     )
 
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Found {len(results)} matching commits:\n\n"
-                        + "\n\n---\n\n".join(formatted_results),
-                    )
-                ]
+                response_text = (
+                    f"Found {len(actual_results)} matching commits:\n\n"
+                    + "\n\n---\n\n".join(formatted_results)
+                )
+
+                # Add warning message if background indexing is happening
+                if warning_message:
+                    response_text += f"\n\n⚠️  {warning_message}"
+
+                return [TextContent(type="text", text=response_text)]
 
             except (RepositoryNotIndexedException, RepositoryIndexingException) as e:
                 return [TextContent(type="text", text=str(e))]
@@ -556,6 +1262,49 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
                 if repository.error_message:
                     status_text += f"\n**Error:** {repository.error_message}"
+
+                # Add auto-update information
+                if repository.status == RepositoryStatus.INDEXED:
+                    try:
+                        is_stale, commit_gap = await search_engine._is_index_stale(
+                            repository_id, repository.canonical_path
+                        )
+                        if is_stale and commit_gap > 0:
+                            status_text += (
+                                f"\n**Index Status:** Stale ({commit_gap} new commits available)"
+                            )
+                            if commit_gap < search_engine.background_threshold:
+                                status_text += (
+                                    "\n**Auto-update:** Will update immediately on next search"
+                                )
+                            else:
+                                status_text += (
+                                    "\n**Auto-update:** Will update in background on next search"
+                                )
+                        else:
+                            status_text += "\n**Index Status:** Up to date"
+                    except Exception as e:
+                        logger.warning(f"Could not check staleness for status: {e}")
+
+                # Add background task progress if available
+                progress_info = search_engine.get_background_task_progress(repository_id)
+                if progress_info:
+                    status_text += "\n\n**Background Indexing:**"
+                    status_text += f"\n• Phase: {progress_info['phase']}"
+                    status_text += f"\n• Progress: {progress_info['commits_processed']}/{progress_info['total_commits']} commits"
+                    if progress_info.get("progress_percent"):
+                        status_text += f" ({progress_info['progress_percent']}%)"
+                    status_text += f"\n• Batch: {progress_info['current_batch']}/{progress_info['total_batches']}"
+                    status_text += f"\n• Elapsed: {progress_info['elapsed_human']}"
+                    status_text += f"\n• ETA: {progress_info['eta_human']}"
+
+                # Add auto-update configuration info
+                status_text += (
+                    f"\n\n**Auto-update Config:**\n"
+                    f"• Enabled: {'Yes' if search_engine.enable_auto_update else 'No'}\n"
+                    f"• Background Threshold: {search_engine.background_threshold} commits\n"
+                    f"• Cache: {search_engine.staleness_check_cache_minutes} min"
+                )
 
                 return [TextContent(type="text", text=status_text)]
 
@@ -726,6 +1475,65 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             except Exception as e:
                 logger.error(f"Error in who_wrote: {e}")
                 return [TextContent(type="text", text=f"Error finding authors: {str(e)}")]
+
+        elif name == "configure_auto_update":
+            enable_auto_update = arguments.get("enable_auto_update")
+            background_threshold = arguments.get("background_threshold")
+            staleness_check_cache_minutes = arguments.get("staleness_check_cache_minutes")
+
+            try:
+                # Update configuration in the search engine
+                config_updated = []
+
+                if enable_auto_update is not None:
+                    search_engine.enable_auto_update = enable_auto_update
+                    config_updated.append(
+                        f"Auto-update: {'enabled' if enable_auto_update else 'disabled'}"
+                    )
+
+                if background_threshold is not None:
+                    search_engine.background_threshold = background_threshold
+                    config_updated.append(f"Background threshold: {background_threshold} commits")
+
+                if staleness_check_cache_minutes is not None:
+                    search_engine.staleness_check_cache_minutes = staleness_check_cache_minutes
+                    config_updated.append(
+                        f"Cache duration: {staleness_check_cache_minutes} minutes"
+                    )
+                    # Clear existing cache since cache duration changed
+                    search_engine._staleness_cache.clear()
+
+                if config_updated:
+                    response_text = "**Auto-update configuration updated:**\n\n" + "\n".join(
+                        f"• {item}" for item in config_updated
+                    )
+                else:
+                    response_text = "No configuration changes specified."
+
+                return [TextContent(type="text", text=response_text)]
+
+            except Exception as e:
+                logger.error(f"Error configuring auto-update: {e}")
+                return [TextContent(type="text", text=f"Error configuring auto-update: {str(e)}")]
+
+        elif name == "get_auto_update_config":
+            try:
+                config_text = (
+                    "**Current Auto-update Configuration:**\n\n"
+                    f"**Enabled:** {'Yes' if search_engine.enable_auto_update else 'No'}\n"
+                    f"**Background Threshold:** {search_engine.background_threshold} commits\n"
+                    f"**Cache Duration:** {search_engine.staleness_check_cache_minutes} minutes\n\n"
+                    f"**Behavior:**\n"
+                    f"• < {search_engine.background_threshold} commits: Immediate foreground indexing\n"
+                    f"• ≥ {search_engine.background_threshold} commits: Background indexing with warning\n\n"
+                    f"**Cache Status:** {len(search_engine._staleness_cache)} repositories cached"
+                )
+
+                return [TextContent(type="text", text=config_text)]
+
+            except Exception as e:
+                logger.error(f"Error getting auto-update config: {e}")
+                return [TextContent(type="text", text=f"Error getting configuration: {str(e)}")]
 
         else:
             raise ValueError(f"Unknown tool: {name}")
