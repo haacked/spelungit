@@ -96,9 +96,9 @@ except ImportError:
 current_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(current_dir / "src"))
 
-from spelungit.exceptions import (  # noqa: E402
-    RepositoryIndexingException,
-    RepositoryNotIndexedException,
+from spelungit.errors import (  # noqa: E402
+    RepositoryIndexingError,
+    RepositoryNotIndexedError,
 )
 from spelungit.git_integration import GitRepository  # noqa: E402
 from spelungit.lite_embeddings import LiteEmbeddingManager  # noqa: E402
@@ -784,14 +784,14 @@ class LiteSearchEngine:
         # Check repository status
         if repository.status == RepositoryStatus.NOT_INDEXED:
             commit_count = await self._estimate_commit_count(repository.canonical_path)
-            raise RepositoryNotIndexedException(
+            raise RepositoryNotIndexedError(
                 f"Repository '{repository_id}' is not indexed. "
                 f"Estimated {commit_count} commits to process. "
                 f"Use the 'index_repository' tool to begin indexing."
             )
         elif repository.status == RepositoryStatus.INDEXING:
             progress = repository.indexing_progress or 0
-            raise RepositoryIndexingException(
+            raise RepositoryIndexingError(
                 f"Repository '{repository_id}' is being indexed ({progress}% complete). "
                 f"Please wait for indexing to complete."
             )
@@ -1221,7 +1221,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
                 return [TextContent(type="text", text=response_text)]
 
-            except (RepositoryNotIndexedException, RepositoryIndexingException) as e:
+            except (RepositoryNotIndexedError, RepositoryIndexingError) as e:
                 return [TextContent(type="text", text=str(e))]
 
         elif name == "index_repository":
