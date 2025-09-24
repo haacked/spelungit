@@ -54,7 +54,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements-lite.txt
 
 # Test the installation
-python -m src.spelungit.lite_server --test
+python -m spelungit.lite_server --test
 ```
 
 Add to your Claude Code configuration (`~/.config/claude/claude_desktop_config.json`):
@@ -81,6 +81,10 @@ Add to your Claude Code configuration (`~/.config/claude/claude_desktop_config.j
 2. **`index_repository`** - Index a repository for search
 3. **`repository_status`** - Check indexing status
 4. **`get_database_info`** - View database statistics
+5. **`search_blame`** - Search code blame data using natural language
+6. **`who_wrote`** - Find authors who wrote code matching a query
+7. **`configure_auto_update`** - Configure automatic index update behavior
+8. **`get_auto_update_config`** - Get current automatic index update configuration
 
 ### Example Queries
 
@@ -93,6 +97,12 @@ search_commits(query="database schema migration", author_filter="john")
 
 # Look for bug fixes
 search_commits(query="fix error exception handling")
+
+# Search blame information for specific code
+search_blame(query="authentication middleware setup")
+
+# Find who wrote specific functionality
+who_wrote(query="database connection pooling", limit=3)
 ```
 
 ### First Time Setup
@@ -152,6 +162,22 @@ search_commits(query="fix error exception handling")
 
 Default: `~/.config/spelungit/git-history.db`
 
+### Auto-Update Configuration
+
+Configure automatic index updates to keep your search index current:
+
+```python
+# Enable automatic updates with custom settings
+configure_auto_update(
+    enable_auto_update=True,
+    background_threshold=100,     # Process in background if >100 new commits
+    staleness_check_cache_minutes=10  # Check for staleness every 10 minutes
+)
+
+# Check current configuration
+get_auto_update_config()
+```
+
 ### Model Information
 
 - **Embedding Model**: Microsoft's all-MiniLM-L6-v2 via sentence-transformers (384 dimensions)
@@ -184,14 +210,25 @@ src/spelungit/
 ├── lite_server.py          # Main MCP server
 ├── sqlite_database.py      # SQLite database adapter
 ├── lite_embeddings.py      # Hybrid embedding system
+├── embeddings.py           # Embedding utilities
 ├── repository_utils.py     # Git repository detection
 ├── git_integration.py      # Git operations
-├── models.py              # Data models
-└── exceptions.py          # Custom exceptions
+├── git_operations.py       # Git command operations
+├── git_scanner.py          # Git history scanning
+├── search_engine.py        # Search functionality
+├── indexer.py              # Repository indexing
+├── config.py               # Configuration management
+├── cli.py                  # Command line interface
+├── models.py               # Data models
+├── exceptions.py           # Custom exceptions
+├── errors.py               # Error definitions
+└── search/                 # Search utilities
+    ├── __init__.py
+    └── cache.py            # Search caching
 
-tests/                     # Test suite
-requirements-lite.txt      # Zero-config dependencies
-install.sh                # Automatic installer
+tests/                      # Test suite
+requirements-lite.txt       # Zero-config dependencies
+install.sh                  # Automatic installer
 ```
 
 ### Running Tests
