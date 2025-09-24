@@ -125,13 +125,13 @@ class LiteSearchEngine:
         self.db = db_manager
         self.embeddings = embedding_manager
         # Cache for staleness checks to avoid repeated git calls
-        self._staleness_cache: Dict[str, Tuple[Tuple[bool, int], Any]] = {}
+        self._staleness_cache = {}  # type: ignore[var-annotated]
         # Track active background indexing tasks to prevent race conditions
-        self._background_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._background_tasks = {}  # type: ignore[var-annotated]
         # Lock for atomic task management to prevent race conditions
         self._task_lock = asyncio.Lock()
         # Track progress and metadata for background tasks
-        self._background_progress: Dict[str, Dict[str, Any]] = {}
+        self._background_progress = {}  # type: ignore[var-annotated]
         # Configuration for auto-updates
         self.background_threshold = 50  # Commits threshold for background vs foreground indexing
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes

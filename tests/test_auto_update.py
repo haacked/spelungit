@@ -1,5 +1,6 @@
 """Tests for just-in-time auto-update functionality."""
 
+import asyncio
 import tempfile
 import os
 from datetime import datetime, timedelta
