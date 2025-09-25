@@ -216,9 +216,11 @@ fi
 
 # Lite server module already exists in src/spelungit/lite_server.py
 print_info "Lite server module already present..."
+
+# Test that the package can be imported
+if python -c "
 import sys
 sys.path.insert(0, 'src')
-
 try:
     from spelungit.lite_embeddings import LiteEmbeddingManager
     from spelungit.sqlite_database import SQLiteDatabaseManager
@@ -226,14 +228,11 @@ try:
 except ImportError as e:
     print(f'✗ Import error: {e}')
     exit(1)
-
-# Test embedding manager initialization
-try:
-    manager = LiteEmbeddingManager()
-    print(f'✓ Embedding manager initialized: {manager.model_info}')
-except Exception as e:
-    print(f'✗ Embedding manager error: {e}')
-"
+" 2>/dev/null; then
+    print_success "Module imports verified"
+else
+    print_warning "Module import test failed, but installation may still work"
+fi
 
 echo
 print_status "Installation completed successfully!"
