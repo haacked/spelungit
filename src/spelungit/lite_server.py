@@ -178,7 +178,7 @@ class LiteSearchEngine:
             cached_data, cache_time = self._staleness_cache[cache_key]
             cache_age_minutes = (now - cache_time).total_seconds() / 60
             if cache_age_minutes < self.staleness_check_cache_minutes:
-                return cached_data
+                return cached_data  # type: ignore[return-value]
 
         try:
             # Get latest indexed commit SHA
@@ -511,7 +511,7 @@ class LiteSearchEngine:
         else:
             progress_info["eta_human"] = "unknown"
 
-        return progress_info
+        return progress_info  # type: ignore[return-value]
 
     def _cleanup_stale_progress(self) -> None:
         """Remove stale progress entries older than threshold to prevent memory leaks."""
@@ -1170,6 +1170,12 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             limit = arguments.get("limit", 10)
             author_filter = arguments.get("author_filter")
 
+            # Input validation
+            if not query or not query.strip():
+                raise ValueError("Query cannot be empty")
+            if limit < 1 or limit > 100:
+                raise ValueError("Limit must be between 1 and 100")
+
             try:
                 results = await search_engine.search_commits(
                     query=query,
@@ -1227,6 +1233,10 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         elif name == "index_repository":
             repository_path = arguments.get("repository_path")
             batch_size = arguments.get("batch_size", 100)
+
+            # Input validation
+            if batch_size < 1 or batch_size > 1000:
+                raise ValueError("Batch size must be between 1 and 1000")
 
             result = await search_engine.index_repository(
                 repository_path=repository_path, batch_size=batch_size
