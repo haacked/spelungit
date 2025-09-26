@@ -1,18 +1,15 @@
 [bandit]
 exclude_dirs = tests,venv,.venv,env,.env
 # Skip common false positives for Git tools
-# Use: bandit -r src/ -s B101,B311,B324,B404,B603,B607
-# Or update CI to include these skip flags
+skips = B101,B324,B404,B603,B607
 
 # B101: Test for use of assert (we use asserts in tests)
-# B311: Standard pseudo-random generators (used for retry jitter, not security)
 # B324: Weak MD5 hash (used for cache keys, not security)
 # B404: Import subprocess (required for Git operations)
-# B603: Subprocess without shell=True (safe when using fixed commands)
+# B603: Subprocess without shell=True (safe when using fixed commands with git)
 # B607: Starting process with partial executable path (standard to use "git")
 
-# Note: bandit config skip doesn't seem to work reliably in all versions
-# The CI should use: bandit -r src/ -s B101,B311,B324,B404,B603,B607 -f json -o bandit-report.json
+# Note: B311 was fixed by switching to secrets.SystemRandom()
 
 [bandit_assert_used]
 # Allow assert in test files

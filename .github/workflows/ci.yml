@@ -159,7 +159,8 @@ jobs:
         # Test that bin/dev commands work (without full quality checks - already done in quality job)
         python -m venv venv
         source venv/bin/activate
-        pip install -r requirements-dev.txt
+        pip install -r requirements-ci.txt
+        pip install -e .
         # Quick validation that dev scripts are functional
         bin/dev clean
         bin/dev --help

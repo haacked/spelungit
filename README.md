@@ -210,21 +210,12 @@ src/spelungit/
 ├── lite_server.py          # Main MCP server
 ├── sqlite_database.py      # SQLite database adapter
 ├── lite_embeddings.py      # Hybrid embedding system
-├── embeddings.py           # Embedding utilities
 ├── repository_utils.py     # Git repository detection
 ├── git_integration.py      # Git operations
-├── git_operations.py       # Git command operations
-├── git_scanner.py          # Git history scanning
 ├── search_engine.py        # Search functionality
-├── indexer.py              # Repository indexing
-├── config.py               # Configuration management
-├── cli.py                  # Command line interface
 ├── models.py               # Data models
-├── exceptions.py           # Custom exceptions
 ├── errors.py               # Error definitions
-└── search/                 # Search utilities
-    ├── __init__.py
-    └── cache.py            # Search caching
+└── __init__.py             # Package initialization
 
 tests/                      # Test suite
 requirements-lite.txt       # Zero-config dependencies

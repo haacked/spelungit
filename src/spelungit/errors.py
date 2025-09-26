@@ -337,9 +337,9 @@ async def retry_async(
             delay = min(config.base_delay * (config.exponential_base**attempt), config.max_delay)
 
             if config.jitter:
-                import random
+                import secrets
 
-                delay *= 0.5 + random.random() * 0.5  # Add 0-50% jitter
+                delay *= 0.5 + secrets.SystemRandom().random() * 0.5  # Add 0-50% jitter
 
             logger.warning(
                 f"Function {func.__name__} failed (attempt {attempt + 1}/{config.max_attempts}), retrying in {delay:.2f}s: {e}"

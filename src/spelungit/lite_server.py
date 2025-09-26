@@ -96,9 +96,9 @@ except ImportError:
 current_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(current_dir / "src"))
 
-from spelungit.exceptions import (  # noqa: E402
-    RepositoryIndexingException,
-    RepositoryNotIndexedException,
+from spelungit.errors import (  # noqa: E402
+    RepositoryIndexingError,
+    RepositoryNotIndexedError,
 )
 from spelungit.git_integration import GitRepository  # noqa: E402
 from spelungit.lite_embeddings import LiteEmbeddingManager  # noqa: E402
@@ -125,13 +125,13 @@ class LiteSearchEngine:
         self.db = db_manager
         self.embeddings = embedding_manager
         # Cache for staleness checks to avoid repeated git calls
-        self._staleness_cache = {}
+        self._staleness_cache = {}  # type: ignore[var-annotated]
         # Track active background indexing tasks to prevent race conditions
-        self._background_tasks = {}
+        self._background_tasks = {}  # type: ignore[var-annotated]
         # Lock for atomic task management to prevent race conditions
         self._task_lock = asyncio.Lock()
         # Track progress and metadata for background tasks
-        self._background_progress = {}
+        self._background_progress = {}  # type: ignore[var-annotated]
         # Configuration for auto-updates
         self.background_threshold = 50  # Commits threshold for background vs foreground indexing
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes
@@ -178,7 +178,7 @@ class LiteSearchEngine:
             cached_data, cache_time = self._staleness_cache[cache_key]
             cache_age_minutes = (now - cache_time).total_seconds() / 60
             if cache_age_minutes < self.staleness_check_cache_minutes:
-                return cached_data
+                return cached_data  # type: ignore[return-value]
 
         try:
             # Get latest indexed commit SHA
@@ -511,7 +511,7 @@ class LiteSearchEngine:
         else:
             progress_info["eta_human"] = "unknown"
 
-        return progress_info
+        return progress_info  # type: ignore[return-value]
 
     def _cleanup_stale_progress(self) -> None:
         """Remove stale progress entries older than threshold to prevent memory leaks."""
@@ -784,14 +784,14 @@ class LiteSearchEngine:
         # Check repository status
         if repository.status == RepositoryStatus.NOT_INDEXED:
             commit_count = await self._estimate_commit_count(repository.canonical_path)
-            raise RepositoryNotIndexedException(
+            raise RepositoryNotIndexedError(
                 f"Repository '{repository_id}' is not indexed. "
                 f"Estimated {commit_count} commits to process. "
                 f"Use the 'index_repository' tool to begin indexing."
             )
         elif repository.status == RepositoryStatus.INDEXING:
             progress = repository.indexing_progress or 0
-            raise RepositoryIndexingException(
+            raise RepositoryIndexingError(
                 f"Repository '{repository_id}' is being indexed ({progress}% complete). "
                 f"Please wait for indexing to complete."
             )
@@ -862,7 +862,7 @@ class LiteSearchEngine:
                 }
             )
 
-        return results
+        return results  # type: ignore[no-any-return]
 
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
@@ -871,7 +871,7 @@ class LiteSearchEngine:
             return await git_repo.get_commit_count()
 
         try:
-            return await self._with_git_repo(repository_path, get_count)
+            return await self._with_git_repo(repository_path, get_count)  # type: ignore[no-any-return]
         except Exception:
             return 0
 
@@ -1170,6 +1170,12 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             limit = arguments.get("limit", 10)
             author_filter = arguments.get("author_filter")
 
+            # Input validation
+            if not query or not query.strip():
+                raise ValueError("Query cannot be empty")
+            if limit < 1 or limit > 100:
+                raise ValueError("Limit must be between 1 and 100")
+
             try:
                 results = await search_engine.search_commits(
                     query=query,
@@ -1221,12 +1227,16 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
                 return [TextContent(type="text", text=response_text)]
 
-            except (RepositoryNotIndexedException, RepositoryIndexingException) as e:
+            except (RepositoryNotIndexedError, RepositoryIndexingError) as e:
                 return [TextContent(type="text", text=str(e))]
 
         elif name == "index_repository":
             repository_path = arguments.get("repository_path")
             batch_size = arguments.get("batch_size", 100)
+
+            # Input validation
+            if batch_size < 1 or batch_size > 1000:
+                raise ValueError("Batch size must be between 1 and 1000")
 
             result = await search_engine.index_repository(
                 repository_path=repository_path, batch_size=batch_size

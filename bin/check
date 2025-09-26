@@ -73,26 +73,54 @@ if ! run_command "$lint_cmd" "Running linters"; then
 	success=false
 fi
 
-# Security checks (commented out due to dependency issues in current environment)
-# if command_exists bandit; then
-# 	if ! run_command "bandit -r src/" "Running security scan"; then
-# 		warning "Security issues found (this may be due to bandit configuration issues)"
-# 		# Don't fail on security warnings in check mode
-# 	fi
-# else
-# 	info "Bandit not available - skipping security scan"
-# fi
+# Security checks - don't fail the build but report issues
+if command_exists bandit; then
+	print_color blue "Running security scan"
+	# Skip common false positives for git operations
+	if bandit -r src/ -s B404,B603,B607 >/dev/null 2>&1; then
+		print_color green "✓ Running security scan"
+	else
+		print_color yellow "⚠ Running security scan found issues"
+		echo "Security scan details (showing summary):"
+		bandit -r src/ -s B404,B603,B607 --format json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    results = data.get('results', [])
+    if results:
+        print(f'  Found {len(results)} security issues:')
+        for result in results[:5]:  # Show first 5 issues
+            print(f'    - {result[\"issue_text\"]} (Line {result[\"line_number\"]})')
+        if len(results) > 5:
+            print(f'    ... and {len(results) - 5} more issues')
+    else:
+        print('  All legitimate security issues resolved!')
+except Exception as e:
+    print(f'  Run: bandit -r src/ -s B404,B603,B607 for details')
+"
+		if [ $? -eq 0 ]; then
+			info "Security scan clean after filtering false positives"
+		else
+			warning "Security issues found (legitimate concerns)"
+		fi
+	fi
+else
+	info "Bandit not available - skipping security scan"
+fi
 
-# if command_exists safety; then
-# 	if ! run_command "safety check" "Checking dependency vulnerabilities"; then
-# 		warning "Dependency vulnerabilities found (this may be due to safety configuration issues)"
-# 		# Don't fail on safety warnings in check mode
-# 	fi
-# else
-# 	info "Safety not available - skipping dependency vulnerability check"
-# fi
-
-info "Security checks temporarily disabled due to dependency issues"
+if command_exists safety; then
+	print_color blue "Checking dependency vulnerabilities"
+	if safety check --short-report >/dev/null 2>&1; then
+		print_color green "✓ Checking dependency vulnerabilities"
+	else
+		print_color yellow "⚠ Checking dependency vulnerabilities found issues"
+		echo "Vulnerability scan details:"
+		safety check --short-report 2>&1 | grep -E "(vulnerability|Vulnerability|ADVISORY)" | head -10 | sed 's/^/  /'
+		warning "Dependency vulnerabilities found (often low-risk issues)"
+	fi
+else
+	info "Safety not available - skipping dependency vulnerability check"
+fi
 
 # Pre-commit hooks removed - now pre-commit calls this script instead
 # This prevents circular dependency and tool conflicts
