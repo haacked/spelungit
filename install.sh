@@ -229,7 +229,7 @@ except ImportError as e:
     print(f'✗ Import error: {e}')
     exit(1)
 " 2>/dev/null; then
-    print_success "Module imports verified"
+    print_status "Module imports verified"
 else
     print_warning "Module import test failed, but installation may still work"
 fi
