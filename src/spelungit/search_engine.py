@@ -15,7 +15,7 @@ from .models import (
     RepositoryStatus,
     SearchResult,
 )
-from .repository_utils import get_current_working_directory, get_repository_info
+from .repository_utils import detect_repository_context
 
 logger = logging.getLogger(__name__)
 
@@ -156,32 +156,6 @@ class SearchEngine:
         self.git = git_scanner
         self.embeddings = embedding_manager
 
-    async def _detect_repository_context(
-        self, repository_path: Optional[str] = None
-    ) -> tuple[str, Repository]:
-        """Detect repository context and ensure it's tracked in database."""
-        if repository_path is None:
-            repository_path = get_current_working_directory()
-
-        # Get repository information
-        repo_info = get_repository_info(repository_path)
-        if not repo_info["valid"]:
-            raise ValueError(f"Invalid repository: {repo_info['error']}")
-
-        repository_id = repo_info["repository_id"]
-        canonical_path = repo_info["canonical_path"]
-        current_path = repo_info["current_path"]
-
-        # Ensure repository is tracked in database
-        repository = await self.db.get_or_create_repository(repository_id, canonical_path)
-
-        # Update discovered paths if needed
-        if current_path not in repository.discovered_paths:
-            await self.db.update_repository_discovered_paths(repository_id, current_path)
-            repository.discovered_paths.append(current_path)
-
-        return repository_id, repository
-
     async def search_commits(
         self,
         query: str,
@@ -217,7 +191,7 @@ class SearchEngine:
             query = "recent changes"
 
         # Detect repository context
-        repository_id, repository = await self._detect_repository_context(repository_path)
+        repository_id, repository = await detect_repository_context(self.db, repository_path)
         logger.info(f"Repository detected: {repository_id} ({repository.status.value})")
 
         # Check indexing status and handle appropriately
@@ -395,7 +369,9 @@ class SearchEngine:
         try:
             # Detect repository context if path provided
             if repository_path:
-                repository_id, repository = await self._detect_repository_context(repository_path)
+                repository_id, repository = await detect_repository_context(
+                    self.db, repository_path
+                )
                 commit_count = await self.db.get_commit_count(repository_id)
 
                 return {

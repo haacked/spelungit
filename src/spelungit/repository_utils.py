@@ -8,6 +8,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .models import Repository
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +251,46 @@ def estimate_indexing_time(commit_count: int) -> str:
             return f"~{hours}h"
         else:
             return f"~{hours}h {remaining_minutes}m"
+
+
+async def detect_repository_context(
+    db_manager, repository_path: Optional[str] = None
+) -> tuple[str, "Repository"]:
+    """
+    Detect repository context and ensure it's tracked in database.
+
+    This function consolidates the repository detection logic previously duplicated
+    in LiteSearchEngine and SearchEngine classes.
+
+    Args:
+        db_manager: Database manager instance with get_or_create_repository
+                   and update_repository_discovered_paths methods
+        repository_path: Optional path to repository (defaults to current working directory)
+
+    Returns:
+        Tuple of (repository_id, repository)
+
+    Raises:
+        ValueError: If repository_path is not a valid Git repository
+    """
+    if repository_path is None:
+        repository_path = get_current_working_directory()
+
+    # Get repository information
+    repo_info = get_repository_info(repository_path)
+    if not repo_info["valid"]:
+        raise ValueError(f"Invalid repository: {repo_info['error']}")
+
+    repository_id = repo_info["repository_id"]
+    canonical_path = repo_info["canonical_path"]
+    current_path = repo_info["current_path"]
+
+    # Ensure repository is tracked in database
+    repository = await db_manager.get_or_create_repository(repository_id, canonical_path)
+
+    # Update discovered paths if needed
+    if current_path not in repository.discovered_paths:
+        await db_manager.update_repository_discovered_paths(repository_id, current_path)
+        repository.discovered_paths.append(current_path)
+
+    return repository_id, repository

@@ -239,7 +239,7 @@ class TestAutoUpdate:
         # Make sure repository is marked as INDEXED for the test
         repository.status = RepositoryStatus.INDEXED
 
-        with patch.object(search_engine, '_detect_repository_context') as mock_detect:
+        with patch('spelungit.lite_server.detect_repository_context') as mock_detect:
             with patch.object(search_engine, '_validate_and_repair_repository_state') as mock_validate:
                 with patch.object(search_engine.db, 'get_or_create_repository') as mock_get_repo:
                     with patch.object(search_engine, '_check_and_update_if_stale') as mock_auto_update:

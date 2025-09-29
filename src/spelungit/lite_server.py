@@ -104,10 +104,8 @@ from spelungit.git_integration import GitRepository  # noqa: E402
 from spelungit.lite_embeddings import LiteEmbeddingManager  # noqa: E402
 from spelungit.models import RepositoryStatus  # noqa: E402
 from spelungit.repository_utils import (  # noqa: E402
-    generate_repository_id,
-    get_canonical_repository_path,
+    detect_repository_context,
     get_repository_info,
-    validate_repository_path,
 )
 from spelungit.sqlite_database import SQLiteDatabaseManager  # noqa: E402
 
@@ -137,22 +135,23 @@ class LiteSearchEngine:
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes
         self.enable_auto_update = True  # Global enable/disable flag
 
-    async def _detect_repository_context(self, repository_path: Optional[str] = None) -> tuple:
-        """Detect which repository to search based on context."""
-        if not repository_path:
-            # Use current working directory
-            repository_path = os.getcwd()
+    async def _get_incremental_commits(self, repository_id: str, repository_path: str):
+        """
+        Get commits since the last indexed date for a repository.
 
-        if not validate_repository_path(repository_path):
-            raise ValueError(f"Path is not a valid Git repository: {repository_path}")
+        Args:
+            repository_id: The repository identifier
+            repository_path: Path to the repository
 
-        canonical_path = get_canonical_repository_path(repository_path)
-        repository_id = generate_repository_id(canonical_path)
+        Returns:
+            List of commits since the last indexed date
+        """
 
-        # Get or create repository record
-        repository = await self.db.get_or_create_repository(repository_id, canonical_path)
+        async def get_commits(git_repo):
+            latest_date = await self.db.get_latest_commit_date(repository_id)
+            return await git_repo.get_commits_since(latest_date)
 
-        return repository_id, repository
+        return await self._with_git_repo(repository_path, get_commits)
 
     async def _with_git_repo(self, repo_path: str, operation):
         """Execute an operation with a GitRepository instance, ensuring proper resource management."""
@@ -244,11 +243,7 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            async def get_commits(git_repo):
-                latest_date = await self.db.get_latest_commit_date(repository_id)
-                return await git_repo.get_commits_since(latest_date)
-
-            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+            commits = await self._get_incremental_commits(repository_id, repository.canonical_path)
 
             if not commits:
                 # Update progress tracking for empty commit set
@@ -671,11 +666,7 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            async def get_commits(git_repo):
-                latest_date = await self.db.get_latest_commit_date(repository_id)
-                return await git_repo.get_commits_since(latest_date)
-
-            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+            commits = await self._get_incremental_commits(repository_id, repository.canonical_path)
 
             if not commits:
                 await self.db.update_repository_status(
@@ -758,7 +749,7 @@ class LiteSearchEngine:
         """Search commits using vector similarity within detected repository."""
 
         # Detect repository context
-        repository_id, repository = await self._detect_repository_context(repository_path)
+        repository_id, repository = await detect_repository_context(self.db, repository_path)
 
         # Cleanup stale progress entries to prevent memory leaks
         self._cleanup_stale_progress()
@@ -881,7 +872,7 @@ class LiteSearchEngine:
         """Index a repository for search."""
 
         # Detect repository context
-        repository_id, repository = await self._detect_repository_context(repository_path)
+        repository_id, repository = await detect_repository_context(self.db, repository_path)
 
         # Cleanup stale progress entries to prevent memory leaks
         self._cleanup_stale_progress()
@@ -1255,8 +1246,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             repository_path = arguments.get("repository_path")
 
             try:
-                repository_id, repository = await search_engine._detect_repository_context(
-                    repository_path
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db, repository_path
                 )
 
                 status_text = (
@@ -1344,7 +1335,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
             try:
                 # Use existing search to find relevant commits first
-                repository_id, repository = await search_engine._detect_repository_context()
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db,
+                )
                 search_results = await search_engine.search_commits(query=query, limit=20)
 
                 if not search_results:
@@ -1433,7 +1426,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
             try:
                 # Detect repository context
-                repository_id, repository = await search_engine._detect_repository_context()
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db,
+                )
 
                 # Generate query embedding
                 query_embedding = await embedding_manager.generate_embedding(query)
@@ -1612,7 +1607,7 @@ async def test_lite_search():
 
     # Test repository detection
     try:
-        repo_id, repo = await search_engine._detect_repository_context()
+        repo_id, repo = await detect_repository_context(search_engine.db)
         print(f"✅ Repository detected: {repo_id}")
         print(f"   Path: {repo.canonical_path}")
         print(f"   Status: {repo.status.value}")
