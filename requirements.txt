@@ -1,4 +1,4 @@
-# Lite requirements for zero-config installation
+# Core requirements for zero-config installation
 # No PostgreSQL, no OpenAI API key required
 
 # Core MCP dependencies

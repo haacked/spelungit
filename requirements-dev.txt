@@ -1,8 +1,8 @@
 # Development and testing dependencies
-# Extends requirements-lite.txt with additional dev tools
+# Extends requirements.txt with additional dev tools
 
-# Include lite requirements
--r requirements-lite.txt
+# Include core requirements
+-r requirements.txt
 
 # Testing framework
 pytest>=7.4.0

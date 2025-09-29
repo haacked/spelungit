@@ -209,7 +209,7 @@ check_python_deps() {
 
 # Check if we're in the project root
 check_project_root() {
-	if [ ! -f "requirements-lite.txt" ] || [ ! -d "src/spelungit" ]; then
+	if [ ! -f "requirements.txt" ] || [ ! -d "src/spelungit" ]; then
 		error "Please run this script from the project root directory"
 		exit 1
 	fi
