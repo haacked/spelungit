@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from spelungit.lite_server import SearchEngine
-from spelungit.lite_embeddings import LiteEmbeddingManager
+from spelungit.server import SearchEngine
+from spelungit.embeddings import EmbeddingManager
 from spelungit.models import RepositoryStatus, StoredCommit
 from spelungit.sqlite_database import SQLiteDatabaseManager
 
@@ -41,7 +41,7 @@ class TestAutoUpdate:
     @pytest_asyncio.fixture
     async def embedding_manager(self):
         """Create mock embedding manager."""
-        manager = LiteEmbeddingManager()
+        manager = EmbeddingManager()
         # Mock the generate_embedding method to return a simple vector
         manager.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
         manager.format_commit_for_embedding = MagicMock(return_value="test content")
@@ -113,7 +113,7 @@ class TestAutoUpdate:
         """Test staleness detection when index is up to date."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch("spelungit.lite_server.GitRepository") as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             # Mock git rev-list to return 0 new commits (up to date)
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "0"
@@ -129,7 +129,7 @@ class TestAutoUpdate:
         """Test staleness detection when index is stale."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch("spelungit.lite_server.GitRepository") as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             # Mock git rev-list to return 3 new commits
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "3"
@@ -145,7 +145,7 @@ class TestAutoUpdate:
         """Test that staleness checks are cached properly."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch("spelungit.lite_server.GitRepository") as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "2"
             mock_git_repo.return_value = mock_repo_instance
@@ -259,7 +259,7 @@ class TestAutoUpdate:
         # Make sure repository is marked as INDEXED for the test
         repository.status = RepositoryStatus.INDEXED
 
-        with patch("spelungit.lite_server.detect_repository_context") as mock_detect:
+        with patch("spelungit.server.detect_repository_context") as mock_detect:
             with patch.object(
                 search_engine, "_validate_and_repair_repository_state"
             ) as mock_validate:
@@ -271,7 +271,7 @@ class TestAutoUpdate:
                             search_engine.embeddings, "generate_embedding"
                         ) as mock_embedding:
                             with patch.object(search_engine.db, "search_commits") as mock_search:
-                                with patch("spelungit.lite_server.GitRepository") as mock_git_repo:
+                                with patch("spelungit.server.GitRepository") as mock_git_repo:
                                     # Setup mocks
                                     mock_detect.return_value = (repo_id, repository)
                                     mock_validate.return_value = True

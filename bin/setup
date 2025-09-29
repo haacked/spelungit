@@ -241,7 +241,7 @@ export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
 # Test the setup - this should work even with minimal dependencies
 test_success=true
 print_color blue "Testing core functionality"
-test_output=$(python -m src.spelungit.lite_server --test 2>&1)
+test_output=$(python -m src.spelungit.server --test 2>&1)
 if [ $? -eq 0 ]; then
 	print_color green "✓ Testing core functionality"
 else

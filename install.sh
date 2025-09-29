@@ -136,7 +136,7 @@ if 'mcpServers' not in config:
 
 config['mcpServers']['spelungit'] = {
     'command': '$PYTHON_PATH',
-    'args': ['-m', 'spelungit.lite_server'],
+    'args': ['-m', 'spelungit.server'],
     'env': {
         'PYTHONPATH': '$CURRENT_DIR/src'
     }
@@ -164,7 +164,7 @@ except (FileNotFoundError, json.JSONDecodeError):
 config['mcpServers'] = {
     'spelungit': {
         'command': '$PYTHON_PATH',
-        'args': ['-m', 'spelungit.lite_server'],
+        'args': ['-m', 'spelungit.server'],
         'env': {
             'PYTHONPATH': '$CURRENT_DIR/src'
         }
@@ -188,7 +188,7 @@ print('MCP server configuration created')
         echo "  \"mcpServers\": {"
         echo "    \"spelungit\": {"
         echo "      \"command\": \"$PYTHON_PATH\","
-        echo "      \"args\": [\"-m\", \"spelungit.lite_server\"],"
+        echo "      \"args\": [\"-m\", \"spelungit.server\"],"
         echo "      \"env\": {"
         echo "        \"PYTHONPATH\": \"$CURRENT_DIR/src\""
         echo "      }"
@@ -205,7 +205,7 @@ else
     echo "  \"mcpServers\": {"
     echo "    \"spelungit\": {"
     echo "      \"command\": \"$(which python)\","
-    echo "      \"args\": [\"-m\", \"spelungit.lite_server\"],"
+    echo "      \"args\": [\"-m\", \"spelungit.server\"],"
     echo "      \"env\": {"
     echo "        \"PYTHONPATH\": \"$(pwd)/src\""
     echo "      }"
@@ -222,7 +222,7 @@ if python -c "
 import sys
 sys.path.insert(0, 'src')
 try:
-    from spelungit.lite_embeddings import LiteEmbeddingManager
+    from spelungit.embeddings import EmbeddingManager
     from spelungit.sqlite_database import SQLiteDatabaseManager
     print('✓ All modules imported successfully')
 except ImportError as e:
