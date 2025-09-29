@@ -194,7 +194,7 @@ Configuration files:
 ├── mypy.ini                # MyPy type checker settings
 ├── pytest.ini             # Pytest configuration
 ├── .bandit                # Security scanner settings
-├── requirements-lite.txt   # Runtime dependencies
+├── requirements.txt   # Runtime dependencies
 └── requirements-dev.txt    # Development dependencies
 ```
 

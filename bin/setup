@@ -186,9 +186,9 @@ if ! $skip_pip_operations; then
 	trusted_host_flags="--trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org"
 
 	if $production_mode; then
-		if ! run_command "pip install -r requirements-lite.txt" "Installing production dependencies"; then
+		if ! run_command "pip install -r requirements.txt" "Installing production dependencies"; then
 			warning "Standard installation failed, trying with trusted hosts..."
-			if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
+			if ! run_command "pip install -r requirements.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
 				error "Failed to install production dependencies"
 				info "This may be due to network connectivity or SSL certificate issues"
 				info "Try running the setup later or check your network connection"
@@ -206,16 +206,16 @@ if ! $skip_pip_operations; then
 					info "You can still use the lite server without these optional dependencies"
 					# Try installing just the core requirements
 					warning "Attempting to install core dependencies only..."
-					if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing core dependencies with trusted hosts"; then
+					if ! run_command "pip install -r requirements.txt $trusted_host_flags" "Installing core dependencies with trusted hosts"; then
 						success=false
 					fi
 				fi
 			fi
 		else
 			warning "requirements-dev.txt not found, installing production dependencies"
-			if ! run_command "pip install -r requirements-lite.txt" "Installing production dependencies"; then
+			if ! run_command "pip install -r requirements.txt" "Installing production dependencies"; then
 				warning "Standard installation failed, trying with trusted hosts..."
-				if ! run_command "pip install -r requirements-lite.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
+				if ! run_command "pip install -r requirements.txt $trusted_host_flags" "Installing production dependencies with trusted hosts"; then
 					error "Failed to install production dependencies"
 					info "This may be due to network connectivity or SSL certificate issues"
 					success=false

@@ -51,7 +51,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements-lite.txt
+pip install -r requirements.txt
 
 # Test the installation
 python -m spelungit.server --test
@@ -218,7 +218,7 @@ src/spelungit/
 └── __init__.py             # Package initialization
 
 tests/                      # Test suite
-requirements-lite.txt       # Zero-config dependencies
+requirements.txt       # Zero-config dependencies
 install.sh                  # Automatic installer
 ```
 

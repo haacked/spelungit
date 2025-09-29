@@ -78,7 +78,7 @@ pip install --upgrade pip > /dev/null 2>&1
 
 # Install dependencies
 print_info "Installing dependencies (this may take a few minutes for first-time setup)..."
-pip install -r requirements-lite.txt > /dev/null 2>&1
+pip install -r requirements.txt > /dev/null 2>&1
 print_status "Dependencies installed"
 
 # Install the package in development mode

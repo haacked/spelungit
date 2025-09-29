@@ -28,14 +28,14 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements-lite.txt', 'requirements-dev.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements-lite.txt
+        pip install -r requirements.txt
         pip install -r requirements-dev.txt
         # Install the package in editable mode to ensure imports work
         pip install -e .
@@ -183,7 +183,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements-lite.txt
+        pip install -r requirements.txt
         # Install the package in editable mode to ensure imports work
         pip install -e .
 
