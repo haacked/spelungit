@@ -1,8 +1,6 @@
 """Tests for just-in-time auto-update functionality."""
 
-import asyncio
 import tempfile
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from spelungit.lite_server import LiteSearchEngine
-from spelungit.lite_embeddings import LiteEmbeddingManager
-from spelungit.models import Repository, RepositoryStatus, StoredCommit
+from spelungit.server import SearchEngine
+from spelungit.embeddings import EmbeddingManager
+from spelungit.models import RepositoryStatus, StoredCommit
 from spelungit.sqlite_database import SQLiteDatabaseManager
 
 
@@ -26,18 +24,24 @@ class TestAutoUpdate:
             db_path = temp_file.name
 
         manager = SQLiteDatabaseManager(db_path)
-        await manager.initialize()
-
-        yield manager
-
-        await manager.close()
-        # Clean up
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            await manager.initialize()
+            yield manager
+        finally:
+            # Ensure cleanup always happens
+            try:
+                await manager.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+            try:
+                Path(db_path).unlink(missing_ok=True)
+            except Exception:
+                pass  # Ignore file deletion errors
 
     @pytest_asyncio.fixture
     async def embedding_manager(self):
         """Create mock embedding manager."""
-        manager = LiteEmbeddingManager()
+        manager = EmbeddingManager()
         # Mock the generate_embedding method to return a simple vector
         manager.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
         manager.format_commit_for_embedding = MagicMock(return_value="test content")
@@ -46,8 +50,21 @@ class TestAutoUpdate:
     @pytest_asyncio.fixture
     async def search_engine(self, db_manager, embedding_manager):
         """Create search engine with mocked dependencies."""
-        engine = LiteSearchEngine(db_manager, embedding_manager)
-        return engine
+        engine = SearchEngine(db_manager, embedding_manager)
+        try:
+            yield engine
+        finally:
+            # Clean up any background tasks
+            try:
+                async with engine._task_lock:
+                    for task in list(engine._background_tasks.values()):
+                        if not task.done():
+                            task.cancel()
+                    engine._background_tasks.clear()
+                    engine._background_progress.clear()
+                    engine._staleness_cache.clear()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     @pytest_asyncio.fixture
     async def mock_repository(self, db_manager):
@@ -96,7 +113,7 @@ class TestAutoUpdate:
         """Test staleness detection when index is up to date."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             # Mock git rev-list to return 0 new commits (up to date)
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "0"
@@ -112,7 +129,7 @@ class TestAutoUpdate:
         """Test staleness detection when index is stale."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             # Mock git rev-list to return 3 new commits
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "3"
@@ -128,7 +145,7 @@ class TestAutoUpdate:
         """Test that staleness checks are cached properly."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+        with patch("spelungit.server.GitRepository") as mock_git_repo:
             mock_repo_instance = AsyncMock()
             mock_repo_instance._run_git_command.return_value = "2"
             mock_git_repo.return_value = mock_repo_instance
@@ -139,7 +156,7 @@ class TestAutoUpdate:
             # Second call should use cache (git command shouldn't be called again)
             is_stale2, commit_gap2 = await search_engine._is_index_stale(repo_id, canonical_path)
 
-            assert is_stale1 == is_stale2 == True
+            assert is_stale1 == is_stale2 is True
             assert commit_gap1 == commit_gap2 == 2
 
             # Git command should only have been called once due to caching
@@ -154,14 +171,14 @@ class TestAutoUpdate:
         search_engine.enable_auto_update = False
 
         # Mock stale index
-        with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
+        with patch.object(search_engine, "_is_index_stale") as mock_stale_check:
             mock_stale_check.return_value = (True, 5)
 
             result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
             # Should not update when disabled
-            assert result["updated"] == False
-            assert result["background"] == False
+            assert not result["updated"]
+            assert not result["background"]
             assert result["commit_gap"] == 0  # Should not even check staleness when disabled
             assert result["warning_message"] == ""
 
@@ -174,14 +191,14 @@ class TestAutoUpdate:
         search_engine.background_threshold = 3
 
         # Mock stale index with commits exceeding background threshold
-        with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
-            with patch.object(search_engine, '_start_background_indexing') as mock_bg_indexing:
+        with patch.object(search_engine, "_is_index_stale") as mock_stale_check:
+            with patch.object(search_engine, "_start_background_indexing"):
                 mock_stale_check.return_value = (True, 5)  # Exceeds threshold of 3
 
                 result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
-                assert result["background"] == True
-                assert result["updated"] == False
+                assert result["background"]
+                assert not result["updated"]
                 assert result["commit_gap"] == 5
                 assert "background" in result["warning_message"].lower()
 
@@ -197,39 +214,42 @@ class TestAutoUpdate:
         search_engine.enable_auto_update = True
         search_engine.background_threshold = 50
 
-        with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
-            with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
-                # Mock stale but below background threshold
-                mock_stale_check.return_value = (True, 3)
+        with patch.object(search_engine, "_is_index_stale") as mock_stale_check:
+            with patch.object(search_engine, "_get_incremental_commits") as mock_get_commits:
+                with patch.object(search_engine.embeddings, "generate_embedding") as mock_embedding:
+                    # Mock stale but below background threshold
+                    mock_stale_check.return_value = (True, 3)
 
-                # Mock git repository for getting new commits
-                mock_repo_instance = AsyncMock()
-                mock_repo_instance.get_commits_since.return_value = [
-                    {
-                        "sha": "new123",
-                        "message": "New commit",
-                        "date": datetime.now(),
-                        "authors": ["author1"],
-                        "files_changed": ["file1.py"],
-                        "diff": "test diff",
-                    }
-                ]
-                mock_git_repo.return_value = mock_repo_instance
+                    # Mock the incremental commits method to return test commits
+                    mock_get_commits.return_value = [
+                        {
+                            "sha": "new123",
+                            "message": "New commit",
+                            "date": datetime.now(),
+                            "authors": ["author1"],
+                            "files_changed": ["file1.py"],
+                            "diff": "test diff",
+                        }
+                    ]
 
-                # Mock database methods
-                search_engine.db.commit_exists = AsyncMock(return_value=False)
-                search_engine.db.store_commit = AsyncMock()
-                search_engine.db.get_commit_count = AsyncMock(return_value=6)
+                    # Mock embedding generation
+                    mock_embedding.return_value = [0.1, 0.2, 0.3]
 
-                result = await search_engine._check_and_update_if_stale(repo_id, repository)
+                    # Mock database methods
+                    search_engine.db.commit_exists = AsyncMock(return_value=False)
+                    search_engine.db.store_commit = AsyncMock()
+                    search_engine.db.get_commit_count = AsyncMock(return_value=6)
+                    search_engine.db.update_repository_status = AsyncMock()
 
-                assert result["updated"] == True
-                assert result["background"] == False
-                assert result["commit_gap"] == 3
-                assert result["warning_message"] == ""
+                    result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
-                # Verify that store_commit was called
-                search_engine.db.store_commit.assert_called_once()
+                    assert result["updated"]
+                    assert not result["background"]
+                    assert result["commit_gap"] == 3
+                    assert result["warning_message"] == ""
+
+                    # Verify that store_commit was called
+                    search_engine.db.store_commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_search_triggers_auto_update(self, search_engine, mock_repository):
@@ -239,13 +259,19 @@ class TestAutoUpdate:
         # Make sure repository is marked as INDEXED for the test
         repository.status = RepositoryStatus.INDEXED
 
-        with patch.object(search_engine, '_detect_repository_context') as mock_detect:
-            with patch.object(search_engine, '_validate_and_repair_repository_state') as mock_validate:
-                with patch.object(search_engine.db, 'get_or_create_repository') as mock_get_repo:
-                    with patch.object(search_engine, '_check_and_update_if_stale') as mock_auto_update:
-                        with patch.object(search_engine.embeddings, 'generate_embedding') as mock_embedding:
-                            with patch.object(search_engine.db, 'search_commits') as mock_search:
-                                with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
+        with patch("spelungit.server.detect_repository_context") as mock_detect:
+            with patch.object(
+                search_engine, "_validate_and_repair_repository_state"
+            ) as mock_validate:
+                with patch.object(search_engine.db, "get_or_create_repository") as mock_get_repo:
+                    with patch.object(
+                        search_engine, "_check_and_update_if_stale"
+                    ) as mock_auto_update:
+                        with patch.object(
+                            search_engine.embeddings, "generate_embedding"
+                        ) as mock_embedding:
+                            with patch.object(search_engine.db, "search_commits") as mock_search:
+                                with patch("spelungit.server.GitRepository") as mock_git_repo:
                                     # Setup mocks
                                     mock_detect.return_value = (repo_id, repository)
                                     mock_validate.return_value = True
@@ -254,20 +280,22 @@ class TestAutoUpdate:
                                         "updated": True,
                                         "background": False,
                                         "commit_gap": 3,
-                                        "warning_message": ""
+                                        "warning_message": "",
                                     }
                                     mock_embedding.return_value = [0.1, 0.2, 0.3]
                                     mock_search.return_value = []
 
                                     mock_repo_instance = AsyncMock()
                                     mock_repo_instance.get_commit_info.return_value = {
-                                        "message": "test", "author": "test", "date": "2023-01-01",
-                                        "files_changed": []
+                                        "message": "test",
+                                        "author": "test",
+                                        "date": "2023-01-01",
+                                        "files_changed": [],
                                     }
                                     mock_git_repo.return_value = mock_repo_instance
 
                                     # Perform search
-                                    results = await search_engine.search_commits("test query")
+                                    await search_engine.search_commits("test query")
 
                                     # Verify auto-update was called
                                     mock_auto_update.assert_called_once_with(repo_id, repository)
@@ -276,7 +304,7 @@ class TestAutoUpdate:
     async def test_configuration_changes(self, search_engine):
         """Test configuration parameter changes."""
         # Test initial configuration
-        assert search_engine.enable_auto_update == True
+        assert search_engine.enable_auto_update
         assert search_engine.background_threshold == 50
         assert search_engine.staleness_check_cache_minutes == 5
 
@@ -285,7 +313,7 @@ class TestAutoUpdate:
         search_engine.background_threshold = 100
         search_engine.staleness_check_cache_minutes = 10
 
-        assert search_engine.enable_auto_update == False
+        assert not search_engine.enable_auto_update
         assert search_engine.background_threshold == 100
         assert search_engine.staleness_check_cache_minutes == 10
 
@@ -312,15 +340,15 @@ class TestAutoUpdate:
         # Set very low background threshold
         search_engine.background_threshold = 2
 
-        with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
-            with patch.object(search_engine, '_start_background_indexing') as mock_bg_indexing:
+        with patch.object(search_engine, "_is_index_stale") as mock_stale_check:
+            with patch.object(search_engine, "_start_background_indexing"):
                 # Mock large commit gap
                 mock_stale_check.return_value = (True, 75)
 
                 result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
-                assert result["background"] == True
-                assert result["updated"] == False
+                assert result["background"]
+                assert not result["updated"]
                 assert result["commit_gap"] == 75
                 assert "75 new commits" in result["warning_message"]
                 assert "background" in result["warning_message"].lower()
@@ -331,13 +359,13 @@ class TestAutoUpdate:
         """Test that no update happens when index is already fresh."""
         repo_id, canonical_path, repository = mock_repository
 
-        with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
+        with patch.object(search_engine, "_is_index_stale") as mock_stale_check:
             # Mock fresh index
             mock_stale_check.return_value = (False, 0)
 
             result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
-            assert result["updated"] == False
-            assert result["background"] == False
+            assert not result["updated"]
+            assert not result["background"]
             assert result["commit_gap"] == 0
             assert result["warning_message"] == ""

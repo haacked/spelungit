@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.scripts]
-spelungit = "spelungit.lite_server:main"
+spelungit = "spelungit.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

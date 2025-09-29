@@ -8,6 +8,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .models import Repository
 
 logger = logging.getLogger(__name__)
 
@@ -139,23 +143,6 @@ def generate_repository_id(canonical_path: str) -> str:
     return f"{path_name}-{path_hash}"
 
 
-def validate_repository_path(path: str) -> bool:
-    """
-    Validate that a path contains a Git repository.
-
-    Args:
-        path: Path to check
-
-    Returns:
-        True if path contains a valid Git repository
-    """
-    try:
-        subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path, capture_output=True, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
-
-
 def get_current_working_directory() -> str:
     """
     Get the current working directory.
@@ -217,33 +204,44 @@ def get_repository_info(working_dir: str) -> dict:
         }
 
 
-def estimate_indexing_time(commit_count: int) -> str:
+async def detect_repository_context(
+    db_manager, repository_path: Optional[str] = None
+) -> tuple[str, "Repository"]:
     """
-    Estimate indexing time based on commit count.
-    Assumes ~100 commits per minute with embedding API calls.
+    Detect repository context and ensure it's tracked in database.
+
+    This function consolidates the repository detection logic previously duplicated
+    in search engine classes.
 
     Args:
-        commit_count: Number of commits to index
+        db_manager: Database manager instance with get_or_create_repository
+                   and update_repository_discovered_paths methods
+        repository_path: Optional path to repository (defaults to current working directory)
 
     Returns:
-        Human-readable time estimate
+        Tuple of (repository_id, repository)
+
+    Raises:
+        ValueError: If repository_path is not a valid Git repository
     """
-    if commit_count <= 0:
-        return "0 minutes"
+    if repository_path is None:
+        repository_path = get_current_working_directory()
 
-    # Rough estimate: 100 commits per minute (including API calls)
-    minutes = max(1, commit_count // 100)
+    # Get repository information
+    repo_info = get_repository_info(repository_path)
+    if not repo_info["valid"]:
+        raise ValueError(f"Invalid repository: {repo_info['error']}")
 
-    if minutes < 2:
-        return "~1 minute"
-    elif minutes < 10:
-        return f"~{minutes} minutes"
-    elif minutes < 60:
-        return f"~{minutes} minutes"
-    else:
-        hours = minutes // 60
-        remaining_minutes = minutes % 60
-        if remaining_minutes == 0:
-            return f"~{hours}h"
-        else:
-            return f"~{hours}h {remaining_minutes}m"
+    repository_id = repo_info["repository_id"]
+    canonical_path = repo_info["canonical_path"]
+    current_path = repo_info["current_path"]
+
+    # Ensure repository is tracked in database
+    repository = await db_manager.get_or_create_repository(repository_id, canonical_path)
+
+    # Update discovered paths if needed
+    if current_path not in repository.discovered_paths:
+        await db_manager.update_repository_discovered_paths(repository_id, current_path)
+        repository.discovered_paths.append(current_path)
+
+    return repository_id, repository

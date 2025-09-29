@@ -16,19 +16,6 @@ except ImportError:
     USE_PYDANTIC = False
 
 
-# Custom exceptions for repository operations
-class RepositoryNotIndexedException(Exception):
-    """Raised when attempting to search a repository that is not indexed."""
-
-    pass
-
-
-class RepositoryIndexingException(Exception):
-    """Raised when attempting to search a repository that is currently being indexed or failed to index."""
-
-    pass
-
-
 if USE_PYDANTIC:
 
     class CommitInfo(BaseModel):

@@ -109,16 +109,6 @@ class SpelunkError(Exception):
 # Specific exception types for different error scenarios
 
 
-class ValidationError(SpelunkError):
-    """Raised when input validation fails."""
-
-    def __init__(self, message: str, field: Optional[str] = None, **kwargs):
-        self.field = field
-        super().__init__(
-            message, category=ErrorCategory.VALIDATION, severity=ErrorSeverity.LOW, **kwargs
-        )
-
-
 class RepositoryError(SpelunkError):
     """Base class for repository-related errors."""
 
@@ -129,20 +119,6 @@ class RepositoryError(SpelunkError):
         )
         kwargs["context"] = context
         super().__init__(message, **kwargs)
-
-
-class RepositoryNotFoundError(RepositoryError):
-    """Raised when a repository is not found."""
-
-    def __init__(self, repository_id: str, **kwargs):
-        super().__init__(
-            repository_id,
-            f"Repository '{repository_id}' not found",
-            category=ErrorCategory.VALIDATION,
-            severity=ErrorSeverity.MEDIUM,
-            user_message=f"Repository '{repository_id}' does not exist or is not accessible.",
-            **kwargs,
-        )
 
 
 class RepositoryNotIndexedError(RepositoryError):
@@ -182,99 +158,6 @@ class RepositoryIndexingError(RepositoryError):
         )
 
 
-class DatabaseError(SpelunkError):
-    """Database-related errors."""
-
-    def __init__(self, message: str, operation: Optional[str] = None, **kwargs):
-        self.operation = operation
-        context = kwargs.get("context") or ErrorContext(
-            operation=operation or "database_operation", component="database"
-        )
-        kwargs["context"] = context
-        super().__init__(
-            message, category=ErrorCategory.DATABASE, severity=ErrorSeverity.HIGH, **kwargs
-        )
-
-
-class DatabaseConnectionError(DatabaseError):
-    """Database connection errors."""
-
-    def __init__(self, **kwargs):
-        super().__init__(
-            "Failed to connect to database",
-            operation="connect",
-            severity=ErrorSeverity.CRITICAL,
-            user_message="Database is temporarily unavailable. Please try again later.",
-            **kwargs,
-        )
-
-
-class DatabaseSchemaError(DatabaseError):
-    """Database schema migration errors."""
-
-    def __init__(self, message: str, migration_version: Optional[int] = None, **kwargs):
-        self.migration_version = migration_version
-        context = kwargs.get("context") or ErrorContext(
-            operation="schema_migration",
-            component="migrations",
-            additional_data={"migration_version": migration_version} if migration_version else None,
-        )
-        kwargs["context"] = context
-        super().__init__(
-            message,
-            operation="schema_migration",
-            severity=ErrorSeverity.HIGH,
-            **kwargs,
-        )
-
-
-class EmbeddingError(SpelunkError):
-    """Embedding generation errors."""
-
-    def __init__(self, message: str, text_length: Optional[int] = None, **kwargs):
-        self.text_length = text_length
-        context = kwargs.get("context") or ErrorContext(
-            operation="generate_embedding", component="embeddings"
-        )
-        kwargs["context"] = context
-        super().__init__(
-            message,
-            category=ErrorCategory.EXTERNAL_SERVICE,
-            severity=ErrorSeverity.MEDIUM,
-            **kwargs,
-        )
-
-
-class GitOperationError(SpelunkError):
-    """Git operation errors."""
-
-    def __init__(self, message: str, command: Optional[str] = None, **kwargs):
-        self.command = command
-        context = kwargs.get("context") or ErrorContext(
-            operation=f"git_{command}" if command else "git_operation", component="git"
-        )
-        kwargs["context"] = context
-        super().__init__(
-            message, category=ErrorCategory.FILESYSTEM, severity=ErrorSeverity.MEDIUM, **kwargs
-        )
-
-
-class ConfigurationError(SpelunkError):
-    """Configuration-related errors."""
-
-    def __init__(self, message: str, config_key: Optional[str] = None, **kwargs):
-        self.config_key = config_key
-        # Don't override severity if it's already provided
-        if "severity" not in kwargs:
-            kwargs["severity"] = ErrorSeverity.HIGH
-        super().__init__(
-            message,
-            category=ErrorCategory.CONFIGURATION,
-            user_message="Configuration error. Please check your settings.",
-            **kwargs,
-        )
-
-
 # Retry logic and circuit breaker patterns
 
 
@@ -300,7 +183,7 @@ class RetryableError(SpelunkError):
 async def retry_async(
     func: Callable[..., Awaitable[T]],
     config: RetryConfig = RetryConfig(),
-    retryable_exceptions: tuple = (RetryableError, DatabaseConnectionError, EmbeddingError),
+    retryable_exceptions: tuple = (RetryableError,),
     *args,
     **kwargs,
 ) -> T:

@@ -26,7 +26,7 @@ test)
 server)
 	print_color blue "Testing MCP server functionality..."
 	export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
-	exec python -m src.spelungit.lite_server --test
+	exec python -m src.spelungit.server --test
 	;;
 db-info)
 	print_color blue "Database information:"

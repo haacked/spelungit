@@ -54,7 +54,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements-lite.txt
 
 # Test the installation
-python -m spelungit.lite_server --test
+python -m spelungit.server --test
 ```
 
 Add to your Claude Code configuration (`~/.config/claude/claude_desktop_config.json`):
@@ -64,7 +64,7 @@ Add to your Claude Code configuration (`~/.config/claude/claude_desktop_config.j
   "mcpServers": {
     "spelungit": {
       "command": "/path/to/venv/bin/python",
-      "args": ["-m", "spelungit.lite_server"],
+      "args": ["-m", "spelungit.server"],
       "env": {
         "PYTHONPATH": "/path/to/spelungit/src"
       }
@@ -279,7 +279,7 @@ You can still use the fallback mode:
 
 ```bash
 # Test with fallback embeddings
-python -m src.spelungit.lite_server --test
+python -m src.spelungit.server --test
 ```
 
 ### Claude Code Configuration

@@ -8,7 +8,6 @@ from spelungit.errors import (
     CircuitBreaker,
     CircuitBreakerConfig,
     CircuitBreakerState,
-    DatabaseError,
     ErrorCategory,
     ErrorContext,
     ErrorSeverity,
@@ -17,7 +16,6 @@ from spelungit.errors import (
     RetryableError,
     RetryConfig,
     SpelunkError,
-    ValidationError,
     report_error,
     retry_async,
     set_error_reporter,
@@ -84,14 +82,6 @@ class TestSpelunkError:
 class TestSpecificErrors:
     """Test specific error types."""
 
-    def test_validation_error(self):
-        """Test ValidationError."""
-        error = ValidationError("Invalid field", field="test_field")
-
-        assert error.field == "test_field"
-        assert error.category == ErrorCategory.VALIDATION
-        assert error.severity == ErrorSeverity.LOW
-
     def test_repository_not_indexed_error(self):
         """Test RepositoryNotIndexedError."""
         error = RepositoryNotIndexedError("test_repo", commit_count=100)
@@ -100,14 +90,6 @@ class TestSpecificErrors:
         assert error.commit_count == 100
         assert "test_repo" in error.message
         assert "100 commits" in error.message
-
-    def test_database_error(self):
-        """Test DatabaseError."""
-        error = DatabaseError("Connection failed", operation="connect")
-
-        assert error.operation == "connect"
-        assert error.category == ErrorCategory.DATABASE
-        assert error.severity == ErrorSeverity.HIGH
 
 
 class TestRetryLogic:

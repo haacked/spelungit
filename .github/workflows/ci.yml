@@ -64,7 +64,7 @@ jobs:
     - name: Test lite server functionality
       run: |
         cd test-repo
-        python -m spelungit.lite_server --test
+        python -m spelungit.server --test
         cd ..
       env:
         PYTHONPATH: ${{ github.workspace }}/src
@@ -232,14 +232,14 @@ jobs:
         fi
 
         # Test repository detection
-        python -m spelungit.lite_server --test
+        python -m spelungit.server --test
 
         # Test basic functionality without full MCP stack
         python -c "
         import sys, os, asyncio;
         sys.path.insert(0, '${{ github.workspace }}/src');
         from spelungit.sqlite_database import SQLiteDatabaseManager;
-        from spelungit.lite_embeddings import LiteEmbeddingManager;
+        from spelungit.embeddings import EmbeddingManager;
         from spelungit.repository_utils import get_repository_info;
         async def test():
             print('Testing repository detection...');
@@ -249,7 +249,7 @@ jobs:
             db = SQLiteDatabaseManager();
             await db.initialize();
             print('Testing embedding generation...');
-            em = LiteEmbeddingManager();
+            em = EmbeddingManager();
             embedding = await em.generate_embedding('test commit message');
             print(f'Generated embedding dimension: {len(embedding)}');
             await db.close();

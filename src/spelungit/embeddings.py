@@ -1,5 +1,5 @@
 """
-Lite embedding system using sentence-transformers + code pattern matching.
+Embedding system using sentence-transformers + code pattern matching.
 No OpenAI API key required - works completely offline.
 """
 
@@ -235,7 +235,7 @@ class CodePatternExtractor:
         return patterns
 
 
-class LiteEmbeddingManager:
+class EmbeddingManager:
     """Embedding manager using sentence-transformers + code pattern matching."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):

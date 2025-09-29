@@ -85,7 +85,7 @@ fi
 # Lite server functionality test
 if ! $integration_only; then
 	print_color blue "Testing lite server functionality"
-	if python -m src.spelungit.lite_server --test; then
+	if python -m src.spelungit.server --test; then
 		print_color green "✓ Testing lite server functionality"
 	else
 		print_color red "✗ Testing lite server functionality failed"

@@ -24,13 +24,6 @@ repos:
         pass_filenames: false
         files: '^.+\.py$'
         args: [--fix]
-      - id: pytest-check
-        name: pytest-check
-        entry: bin/test
-        language: system
-        pass_filenames: false
-        files: '^.+\.py$'
-        args: [--unit]
 
 ci:
   autofix_commit_msg: |

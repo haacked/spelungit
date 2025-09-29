@@ -231,7 +231,7 @@ async def setup_health_monitoring(connection_pool, cache, search_engine):
 ## Server Integration
 
 ```python
-from spelungit.lite_server_v2 import SpelunkGitMCPServer
+from spelungit.server import SearchEngine
 from spelungit.observability import (
     get_tracing_context, get_metrics_collector, configure_logging,
     LogLevel, trace_operation, increment_counter

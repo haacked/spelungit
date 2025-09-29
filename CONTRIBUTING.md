@@ -172,9 +172,9 @@ Understanding the codebase structure:
 
 ```
 src/git_history_mcp/
-├── lite_server.py          # Main MCP server implementation
+├── server.py               # Main MCP server implementation
 ├── sqlite_database.py      # SQLite database adapter
-├── lite_embeddings.py      # Hybrid embedding system
+├── embeddings.py           # Hybrid embedding system
 ├── repository_utils.py     # Git repository detection utilities
 ├── git_integration.py      # Git operations wrapper
 ├── models.py              # Data models and schemas
@@ -284,14 +284,14 @@ async def test_async_functionality():
 PYTHONPATH=src python -c "
 import logging
 logging.basicConfig(level=logging.DEBUG)
-from git_history_mcp.lite_server import test_lite_search
+from git_history_mcp.server import test_search
 import asyncio
-asyncio.run(test_lite_search())
+asyncio.run(test_search())
 "
 
 # Test specific repository
 cd /path/to/your/repo
-python /path/to/git-history-mcp/src/git_history_mcp/lite_server.py --test
+python /path/to/git-history-mcp/src/git_history_mcp/server.py --test
 ```
 
 ### Common Issues

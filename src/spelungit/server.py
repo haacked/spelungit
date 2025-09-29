@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lite MCP server for Git History search using SQLite + sentence-transformers.
+MCP server for Git History search using SQLite + sentence-transformers.
 Zero-config deployment without PostgreSQL or OpenAI dependencies.
 """
 
@@ -101,13 +101,11 @@ from spelungit.errors import (  # noqa: E402
     RepositoryNotIndexedError,
 )
 from spelungit.git_integration import GitRepository  # noqa: E402
-from spelungit.lite_embeddings import LiteEmbeddingManager  # noqa: E402
+from spelungit.embeddings import EmbeddingManager  # noqa: E402
 from spelungit.models import RepositoryStatus  # noqa: E402
 from spelungit.repository_utils import (  # noqa: E402
-    generate_repository_id,
-    get_canonical_repository_path,
+    detect_repository_context,
     get_repository_info,
-    validate_repository_path,
 )
 from spelungit.sqlite_database import SQLiteDatabaseManager  # noqa: E402
 
@@ -118,10 +116,10 @@ db_manager = None
 embedding_manager = None
 
 
-class LiteSearchEngine:
-    """Lite search engine using SQLite + sentence-transformers."""
+class SearchEngine:
+    """Search engine using SQLite + sentence-transformers."""
 
-    def __init__(self, db_manager: SQLiteDatabaseManager, embedding_manager: LiteEmbeddingManager):
+    def __init__(self, db_manager: SQLiteDatabaseManager, embedding_manager: EmbeddingManager):
         self.db = db_manager
         self.embeddings = embedding_manager
         # Cache for staleness checks to avoid repeated git calls
@@ -137,22 +135,23 @@ class LiteSearchEngine:
         self.staleness_check_cache_minutes = 5  # Cache validity in minutes
         self.enable_auto_update = True  # Global enable/disable flag
 
-    async def _detect_repository_context(self, repository_path: Optional[str] = None) -> tuple:
-        """Detect which repository to search based on context."""
-        if not repository_path:
-            # Use current working directory
-            repository_path = os.getcwd()
+    async def _get_incremental_commits(self, repository_id: str, repository_path: str):
+        """
+        Get commits since the last indexed date for a repository.
 
-        if not validate_repository_path(repository_path):
-            raise ValueError(f"Path is not a valid Git repository: {repository_path}")
+        Args:
+            repository_id: The repository identifier
+            repository_path: Path to the repository
 
-        canonical_path = get_canonical_repository_path(repository_path)
-        repository_id = generate_repository_id(canonical_path)
+        Returns:
+            List of commits since the last indexed date
+        """
 
-        # Get or create repository record
-        repository = await self.db.get_or_create_repository(repository_id, canonical_path)
+        async def get_commits(git_repo):
+            latest_date = await self.db.get_latest_commit_date(repository_id)
+            return await git_repo.get_commits_since(latest_date)
 
-        return repository_id, repository
+        return await self._with_git_repo(repository_path, get_commits)
 
     async def _with_git_repo(self, repo_path: str, operation):
         """Execute an operation with a GitRepository instance, ensuring proper resource management."""
@@ -244,11 +243,7 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            async def get_commits(git_repo):
-                latest_date = await self.db.get_latest_commit_date(repository_id)
-                return await git_repo.get_commits_since(latest_date)
-
-            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+            commits = await self._get_incremental_commits(repository_id, repository.canonical_path)
 
             if not commits:
                 # Update progress tracking for empty commit set
@@ -671,11 +666,7 @@ class LiteSearchEngine:
                 repository_id, RepositoryStatus.INDEXING, progress=0
             )
 
-            async def get_commits(git_repo):
-                latest_date = await self.db.get_latest_commit_date(repository_id)
-                return await git_repo.get_commits_since(latest_date)
-
-            commits = await self._with_git_repo(repository.canonical_path, get_commits)
+            commits = await self._get_incremental_commits(repository_id, repository.canonical_path)
 
             if not commits:
                 await self.db.update_repository_status(
@@ -758,7 +749,7 @@ class LiteSearchEngine:
         """Search commits using vector similarity within detected repository."""
 
         # Detect repository context
-        repository_id, repository = await self._detect_repository_context(repository_path)
+        repository_id, repository = await detect_repository_context(self.db, repository_path)
 
         # Cleanup stale progress entries to prevent memory leaks
         self._cleanup_stale_progress()
@@ -864,6 +855,81 @@ class LiteSearchEngine:
 
         return results  # type: ignore[no-any-return]
 
+    async def search_by_author(
+        self, author_query: str, limit: int = 10, repository_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Search for commits by a specific author."""
+        logger.info(f"Searching for commits by author: '{author_query}'")
+
+        # Use the existing search_commits method with author filtering
+        return await self.search_commits(
+            query=f"commits by {author_query}",
+            repository_path=repository_path,
+            limit=limit,
+            author_filter=author_query,
+        )
+
+    async def search_code_changes(
+        self, code_query: str, limit: int = 10, repository_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Search for specific code changes."""
+        logger.info(f"Searching for code changes: '{code_query}'")
+
+        # Generate embedding with focus on code changes
+        enhanced_query = f"code changes diff: {code_query}"
+        return await self.search_commits(
+            query=enhanced_query,
+            repository_path=repository_path,
+            limit=limit,
+        )
+
+    def format_search_results(self, results: List[Dict[str, Any]], query: str) -> str:
+        """Format search results for display."""
+        if not results:
+            return f"No commits found matching '{query}'."
+
+        response_lines = [f"Found {len(results)} commits matching '{query}':\n"]
+
+        for result in results:
+            # Adapt to SearchEngine's Dict format instead of SearchResult objects
+            rank = result.get("rank", "?")
+            sha = result.get("sha", "unknown")[:8]
+            score = result.get("similarity_score", 0.0)
+
+            response_lines.append(f"## {rank}. {sha} (Score: {score:.3f})")
+
+            if "author_name" in result:
+                author_email = result.get("author_email", "")
+                response_lines.append(f"**Author:** {result['author_name']} <{author_email}>")
+
+            if "commit_date" in result:
+                response_lines.append(f"**Date:** {result['commit_date']}")
+
+            if "message" in result:
+                response_lines.append(f"**Subject:** {result['message']}")
+
+            if "co_authors" in result and result["co_authors"]:
+                response_lines.append(f"**Co-authors:** {', '.join(result['co_authors'])}")
+
+            if "files_changed" in result:
+                files_count = (
+                    len(result["files_changed"])
+                    if isinstance(result["files_changed"], list)
+                    else "unknown"
+                )
+                response_lines.append(f"**Files changed:** {files_count}")
+
+            # Show diff preview if available
+            if "diff" in result and result["diff"]:
+                diff_preview = result["diff"][:500]
+                if len(result["diff"]) > 500:
+                    diff_preview += "..."
+                response_lines.append(f"**Diff preview:**\n```diff\n{diff_preview}\n```")
+
+            response_lines.append("")  # Spacing
+
+        return "\n".join(response_lines)
+
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
 
@@ -881,7 +947,7 @@ class LiteSearchEngine:
         """Index a repository for search."""
 
         # Detect repository context
-        repository_id, repository = await self._detect_repository_context(repository_path)
+        repository_id, repository = await detect_repository_context(self.db, repository_path)
 
         # Cleanup stale progress entries to prevent memory leaks
         self._cleanup_stale_progress()
@@ -986,7 +1052,7 @@ class LiteSearchEngine:
 
 
 # Initialize MCP server
-server = Server("git-history-mcp-lite")
+server = Server("git-history-mcp")
 
 
 @server.list_resources()
@@ -1159,9 +1225,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         await db_manager.initialize()
 
     if not embedding_manager:
-        embedding_manager = LiteEmbeddingManager()
+        embedding_manager = EmbeddingManager()
 
-    search_engine = LiteSearchEngine(db_manager, embedding_manager)
+    search_engine = SearchEngine(db_manager, embedding_manager)
 
     try:
         if name == "search_commits":
@@ -1255,8 +1321,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             repository_path = arguments.get("repository_path")
 
             try:
-                repository_id, repository = await search_engine._detect_repository_context(
-                    repository_path
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db, repository_path
                 )
 
                 status_text = (
@@ -1344,7 +1410,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
             try:
                 # Use existing search to find relevant commits first
-                repository_id, repository = await search_engine._detect_repository_context()
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db,
+                )
                 search_results = await search_engine.search_commits(query=query, limit=20)
 
                 if not search_results:
@@ -1433,7 +1501,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
             try:
                 # Detect repository context
-                repository_id, repository = await search_engine._detect_repository_context()
+                repository_id, repository = await detect_repository_context(
+                    search_engine.db,
+                )
 
                 # Generate query embedding
                 query_embedding = await embedding_manager.generate_embedding(query)
@@ -1572,7 +1642,7 @@ async def main():
         await db_manager.initialize()
         logger.info("✅ SQLite database initialized")
 
-        embedding_manager = LiteEmbeddingManager()
+        embedding_manager = EmbeddingManager()
         logger.info(f"✅ Embedding manager initialized: {embedding_manager.model_info}")
 
     except Exception as e:
@@ -1585,7 +1655,7 @@ async def main():
             read_stream,
             write_stream,
             InitializationOptions(
-                server_name="git-history-mcp-lite",
+                server_name="git-history-mcp",
                 server_version="1.0.0",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
@@ -1595,24 +1665,24 @@ async def main():
         )
 
 
-async def test_lite_search():
-    """Test the lite search functionality without MCP server."""
-    print("🧪 Testing Lite Search Engine")
+async def test_search():
+    """Test the search functionality without MCP server."""
+    print("🧪 Testing Search Engine")
     print("=" * 40)
 
     # Initialize components
     db_manager = SQLiteDatabaseManager()
     await db_manager.initialize()
 
-    embedding_manager = LiteEmbeddingManager()
-    search_engine = LiteSearchEngine(db_manager, embedding_manager)
+    embedding_manager = EmbeddingManager()
+    search_engine = SearchEngine(db_manager, embedding_manager)
 
     print(f"✅ Database initialized: {db_manager.db_path}")
     print(f"✅ Embedding model: {embedding_manager.model_info}")
 
     # Test repository detection
     try:
-        repo_id, repo = await search_engine._detect_repository_context()
+        repo_id, repo = await detect_repository_context(search_engine.db)
         print(f"✅ Repository detected: {repo_id}")
         print(f"   Path: {repo.canonical_path}")
         print(f"   Status: {repo.status.value}")
@@ -1620,17 +1690,17 @@ async def test_lite_search():
         print(f"❌ Repository detection failed: {e}")
 
     await db_manager.close()
-    print("\n✅ Lite search engine test completed")
+    print("\n✅ Search engine test completed")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
-        asyncio.run(test_lite_search())
+        asyncio.run(test_search())
     elif HAS_MCP:
         asyncio.run(main())
     else:
         print("❌ This module requires the MCP library. Install with:")
         print("pip install mcp")
         print("\nOr use the installation script: ./install.sh")
-        print("\nTo test without MCP, use: python -m spelungit.lite_server --test")
+        print("\nTo test without MCP, use: python -m spelungit.server --test")
         sys.exit(1)

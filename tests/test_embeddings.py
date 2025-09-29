@@ -2,7 +2,7 @@
 
 import pytest
 
-from spelungit.lite_embeddings import CodePatternExtractor, LiteEmbeddingManager
+from spelungit.embeddings import CodePatternExtractor, EmbeddingManager
 
 
 class TestCodePatternExtractor:
@@ -60,12 +60,12 @@ class TestCodePatternExtractor:
         assert len(patterns) == 0
 
 
-class TestLiteEmbeddingManager:
+class TestEmbeddingManager:
     """Test lite embedding manager."""
 
     @pytest.fixture
     def embedding_manager(self):
-        return LiteEmbeddingManager()
+        return EmbeddingManager()
 
     def test_initialization(self, embedding_manager):
         """Test embedding manager initialization."""
