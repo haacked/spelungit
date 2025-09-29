@@ -260,7 +260,7 @@ async def detect_repository_context(
     Detect repository context and ensure it's tracked in database.
 
     This function consolidates the repository detection logic previously duplicated
-    in LiteSearchEngine and SearchEngine classes.
+    in search engine classes.
 
     Args:
         db_manager: Database manager instance with get_or_create_repository

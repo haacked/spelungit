@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from spelungit.lite_server import LiteSearchEngine
+from spelungit.lite_server import SearchEngine
 from spelungit.lite_embeddings import LiteEmbeddingManager
 from spelungit.models import Repository, RepositoryStatus, StoredCommit
 from spelungit.sqlite_database import SQLiteDatabaseManager
@@ -26,13 +26,19 @@ class TestAutoUpdate:
             db_path = temp_file.name
 
         manager = SQLiteDatabaseManager(db_path)
-        await manager.initialize()
-
-        yield manager
-
-        await manager.close()
-        # Clean up
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            await manager.initialize()
+            yield manager
+        finally:
+            # Ensure cleanup always happens
+            try:
+                await manager.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+            try:
+                Path(db_path).unlink(missing_ok=True)
+            except Exception:
+                pass  # Ignore file deletion errors
 
     @pytest_asyncio.fixture
     async def embedding_manager(self):
@@ -46,8 +52,21 @@ class TestAutoUpdate:
     @pytest_asyncio.fixture
     async def search_engine(self, db_manager, embedding_manager):
         """Create search engine with mocked dependencies."""
-        engine = LiteSearchEngine(db_manager, embedding_manager)
-        return engine
+        engine = SearchEngine(db_manager, embedding_manager)
+        try:
+            yield engine
+        finally:
+            # Clean up any background tasks
+            try:
+                async with engine._task_lock:
+                    for task in list(engine._background_tasks.values()):
+                        if not task.done():
+                            task.cancel()
+                    engine._background_tasks.clear()
+                    engine._background_progress.clear()
+                    engine._staleness_cache.clear()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     @pytest_asyncio.fixture
     async def mock_repository(self, db_manager):
@@ -198,38 +217,41 @@ class TestAutoUpdate:
         search_engine.background_threshold = 50
 
         with patch.object(search_engine, '_is_index_stale') as mock_stale_check:
-            with patch('spelungit.lite_server.GitRepository') as mock_git_repo:
-                # Mock stale but below background threshold
-                mock_stale_check.return_value = (True, 3)
+            with patch.object(search_engine, '_get_incremental_commits') as mock_get_commits:
+                with patch.object(search_engine.embeddings, 'generate_embedding') as mock_embedding:
+                    # Mock stale but below background threshold
+                    mock_stale_check.return_value = (True, 3)
 
-                # Mock git repository for getting new commits
-                mock_repo_instance = AsyncMock()
-                mock_repo_instance.get_commits_since.return_value = [
-                    {
-                        "sha": "new123",
-                        "message": "New commit",
-                        "date": datetime.now(),
-                        "authors": ["author1"],
-                        "files_changed": ["file1.py"],
-                        "diff": "test diff",
-                    }
-                ]
-                mock_git_repo.return_value = mock_repo_instance
+                    # Mock the incremental commits method to return test commits
+                    mock_get_commits.return_value = [
+                        {
+                            "sha": "new123",
+                            "message": "New commit",
+                            "date": datetime.now(),
+                            "authors": ["author1"],
+                            "files_changed": ["file1.py"],
+                            "diff": "test diff",
+                        }
+                    ]
 
-                # Mock database methods
-                search_engine.db.commit_exists = AsyncMock(return_value=False)
-                search_engine.db.store_commit = AsyncMock()
-                search_engine.db.get_commit_count = AsyncMock(return_value=6)
+                    # Mock embedding generation
+                    mock_embedding.return_value = [0.1, 0.2, 0.3]
 
-                result = await search_engine._check_and_update_if_stale(repo_id, repository)
+                    # Mock database methods
+                    search_engine.db.commit_exists = AsyncMock(return_value=False)
+                    search_engine.db.store_commit = AsyncMock()
+                    search_engine.db.get_commit_count = AsyncMock(return_value=6)
+                    search_engine.db.update_repository_status = AsyncMock()
 
-                assert result["updated"] == True
-                assert result["background"] == False
-                assert result["commit_gap"] == 3
-                assert result["warning_message"] == ""
+                    result = await search_engine._check_and_update_if_stale(repo_id, repository)
 
-                # Verify that store_commit was called
-                search_engine.db.store_commit.assert_called_once()
+                    assert result["updated"] == True
+                    assert result["background"] == False
+                    assert result["commit_gap"] == 3
+                    assert result["warning_message"] == ""
+
+                    # Verify that store_commit was called
+                    search_engine.db.store_commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_search_triggers_auto_update(self, search_engine, mock_repository):

@@ -116,7 +116,7 @@ db_manager = None
 embedding_manager = None
 
 
-class LiteSearchEngine:
+class SearchEngine:
     """Lite search engine using SQLite + sentence-transformers."""
 
     def __init__(self, db_manager: SQLiteDatabaseManager, embedding_manager: LiteEmbeddingManager):
@@ -855,6 +855,81 @@ class LiteSearchEngine:
 
         return results  # type: ignore[no-any-return]
 
+    async def search_by_author(
+        self, author_query: str, limit: int = 10, repository_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Search for commits by a specific author."""
+        logger.info(f"Searching for commits by author: '{author_query}'")
+
+        # Use the existing search_commits method with author filtering
+        return await self.search_commits(
+            query=f"commits by {author_query}",
+            repository_path=repository_path,
+            limit=limit,
+            author_filter=author_query,
+        )
+
+    async def search_code_changes(
+        self, code_query: str, limit: int = 10, repository_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Search for specific code changes."""
+        logger.info(f"Searching for code changes: '{code_query}'")
+
+        # Generate embedding with focus on code changes
+        enhanced_query = f"code changes diff: {code_query}"
+        return await self.search_commits(
+            query=enhanced_query,
+            repository_path=repository_path,
+            limit=limit,
+        )
+
+    def format_search_results(self, results: List[Dict[str, Any]], query: str) -> str:
+        """Format search results for display."""
+        if not results:
+            return f"No commits found matching '{query}'."
+
+        response_lines = [f"Found {len(results)} commits matching '{query}':\n"]
+
+        for result in results:
+            # Adapt to SearchEngine's Dict format instead of SearchResult objects
+            rank = result.get("rank", "?")
+            sha = result.get("sha", "unknown")[:8]
+            score = result.get("similarity_score", 0.0)
+
+            response_lines.append(f"## {rank}. {sha} (Score: {score:.3f})")
+
+            if "author_name" in result:
+                author_email = result.get("author_email", "")
+                response_lines.append(f"**Author:** {result['author_name']} <{author_email}>")
+
+            if "commit_date" in result:
+                response_lines.append(f"**Date:** {result['commit_date']}")
+
+            if "message" in result:
+                response_lines.append(f"**Subject:** {result['message']}")
+
+            if "co_authors" in result and result["co_authors"]:
+                response_lines.append(f"**Co-authors:** {', '.join(result['co_authors'])}")
+
+            if "files_changed" in result:
+                files_count = (
+                    len(result["files_changed"])
+                    if isinstance(result["files_changed"], list)
+                    else "unknown"
+                )
+                response_lines.append(f"**Files changed:** {files_count}")
+
+            # Show diff preview if available
+            if "diff" in result and result["diff"]:
+                diff_preview = result["diff"][:500]
+                if len(result["diff"]) > 500:
+                    diff_preview += "..."
+                response_lines.append(f"**Diff preview:**\n```diff\n{diff_preview}\n```")
+
+            response_lines.append("")  # Spacing
+
+        return "\n".join(response_lines)
+
     async def _estimate_commit_count(self, repository_path: str) -> int:
         """Estimate number of commits in repository."""
 
@@ -1152,7 +1227,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
     if not embedding_manager:
         embedding_manager = LiteEmbeddingManager()
 
-    search_engine = LiteSearchEngine(db_manager, embedding_manager)
+    search_engine = SearchEngine(db_manager, embedding_manager)
 
     try:
         if name == "search_commits":
@@ -1600,7 +1675,7 @@ async def test_lite_search():
     await db_manager.initialize()
 
     embedding_manager = LiteEmbeddingManager()
-    search_engine = LiteSearchEngine(db_manager, embedding_manager)
+    search_engine = SearchEngine(db_manager, embedding_manager)
 
     print(f"✅ Database initialized: {db_manager.db_path}")
     print(f"✅ Embedding model: {embedding_manager.model_info}")
