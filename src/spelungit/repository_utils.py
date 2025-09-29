@@ -143,23 +143,6 @@ def generate_repository_id(canonical_path: str) -> str:
     return f"{path_name}-{path_hash}"
 
 
-def validate_repository_path(path: str) -> bool:
-    """
-    Validate that a path contains a Git repository.
-
-    Args:
-        path: Path to check
-
-    Returns:
-        True if path contains a valid Git repository
-    """
-    try:
-        subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path, capture_output=True, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
-
-
 def get_current_working_directory() -> str:
     """
     Get the current working directory.
@@ -219,38 +202,6 @@ def get_repository_info(working_dir: str) -> dict:
             "is_git_repository": False,
             "error": str(e),
         }
-
-
-def estimate_indexing_time(commit_count: int) -> str:
-    """
-    Estimate indexing time based on commit count.
-    Assumes ~100 commits per minute with embedding API calls.
-
-    Args:
-        commit_count: Number of commits to index
-
-    Returns:
-        Human-readable time estimate
-    """
-    if commit_count <= 0:
-        return "0 minutes"
-
-    # Rough estimate: 100 commits per minute (including API calls)
-    minutes = max(1, commit_count // 100)
-
-    if minutes < 2:
-        return "~1 minute"
-    elif minutes < 10:
-        return f"~{minutes} minutes"
-    elif minutes < 60:
-        return f"~{minutes} minutes"
-    else:
-        hours = minutes // 60
-        remaining_minutes = minutes % 60
-        if remaining_minutes == 0:
-            return f"~{hours}h"
-        else:
-            return f"~{hours}h {remaining_minutes}m"
 
 
 async def detect_repository_context(
