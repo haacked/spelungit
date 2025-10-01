@@ -53,6 +53,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
+# Install the package
+pip install -e .
+
 # Test the installation
 python -m spelungit.server --test
 ```
